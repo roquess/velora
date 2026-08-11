@@ -22,8 +22,8 @@ loop(Coordinator, Ctx, Handles) ->
         done ->
             ok;
         {ok, Tile} ->
-            ok = process_tile(Ctx, Handles, Tile),
-            velora_coordinator:ack(Coordinator, Tile),
+            Partial = process_tile(Ctx, Handles, Tile),
+            velora_coordinator:ack(Coordinator, Tile, Partial),
             loop(Coordinator, Ctx, Handles)
     end.
 
@@ -33,15 +33,16 @@ open_sources(#{sources := Sources}) ->
          {H, Band}
      end || #{uri := Uri, 'band' := Band} <- Sources].
 
-process_tile(#{op := Op, out_base := OutBase, gt := GT, srs := Srs}, Handles, Tile) ->
-    Bins = [begin {ok, B} = rast_gdal:read_window(H, Tile, Band), B end
-            || {H, Band} <- Handles],
-    {ok, Out} = apply_op(Op, Bins),
+process_tile(#{op := Op, out_base := OutBase, gt := GT, srs := Srs,
+               range := Range, bins := Bins}, Handles, Tile) ->
+    Windows = [begin {ok, B} = rast_gdal:read_window(H, Tile, Band), B end
+               || {H, Band} <- Handles],
+    {ok, Out} = apply_op(Op, Windows),
     #{x := X, y := Y, w := W, h := H} = Tile,
     Path = tile_path(OutBase, X, Y),
     ok = velora_storage:write_tile(Path, Out, W, H, Srs,
                                    velora_storage:tile_ullr(GT, Tile)),
-    ok.
+    velora_stats:tile_stats(Out, Range, Bins).
 
 apply_op(ndvi, [Nir, Red]) -> rast:ndvi_u16(Nir, Red);
 apply_op({decode, Scale}, [Bin]) -> rast:decode_u16(Bin, Scale).

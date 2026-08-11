@@ -26,7 +26,7 @@ tiles_distributed_exactly_once(_Config) ->
                 gt => {0.0,1.0,0.0,0.0,0.0,-1.0}, srs => "", dtype => <<"UInt16">>},
         {ok, C} = velora_coordinator:start_link(
                     #{tiles => Tiles, ctx => Ctx,
-                      on_done => fun(Acked) -> Parent ! {done, Acked} end}),
+                      on_done => fun(Acked, _Stats) -> Parent ! {done, Acked} end}),
         %% Spawn pullers everywhere in "wait for go" state first, then release
         %% them all at once. Without this barrier, the local pullers (pure
         %% in-VM gen_server:call, no network hop) drain the whole queue

@@ -27,12 +27,13 @@ do_worker_ndvi() ->
             out_base => OutBase,
             sources => [#{uri => list_to_binary(Scene), 'band' => 1},
                         #{uri => list_to_binary(Scene), 'band' => 2}],
-            gt => maps:get(gt, M), srs => maps:get(srs, M), dtype => maps:get(dtype, M)},
+            gt => maps:get(gt, M), srs => maps:get(srs, M), dtype => maps:get(dtype, M),
+            range => {-1.0, 1.0}, bins => 64},
     Tiles = rast_tiling:tile_grid(8, 8, 4, 4),
     Parent = self(),
     {ok, C} = velora_coordinator:start_link(
                 #{tiles => Tiles, ctx => Ctx,
-                  on_done => fun(A) -> Parent ! {done, length(A)} end}),
+                  on_done => fun(A, _Stats) -> Parent ! {done, length(A)} end}),
     {ok, _W} = velora_worker:start_link(C),
     receive {done, N} -> ?assertEqual(length(Tiles), N)
     after 60000 -> ?assert(false) end,

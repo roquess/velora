@@ -33,7 +33,12 @@ do_submit() ->
     ?assert(filelib:is_regular(Out)),
     {ok, M} = velora_storage:scene_meta(Out),
     ?assertEqual(12, maps:get(width, M)),
-    ?assertEqual(<<"Float32">>, maps:get(dtype, M)).
+    ?assertEqual(<<"Float32">>, maps:get(dtype, M)),
+    #{status := done, stats := Stats} = velora_job_manager:status(JobId),
+    ?assert(is_map(Stats)),
+    ?assert(abs(maps:get(mean, Stats) - (1.0/3.0)) < 1.0e-4),
+    ?assert(maps:get(stddev, Stats) < 1.0e-4),
+    ?assertEqual(12*12, maps:get(count, Stats)).
 
 poll_done(_JobId, 0) -> {error, timeout};
 poll_done(JobId, N) ->
