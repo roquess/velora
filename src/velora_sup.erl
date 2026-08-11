@@ -15,6 +15,7 @@ init([]) ->
           type => supervisor},
         #{id => velora_job_manager,
           start => {velora_job_manager, start_link, []}},
-        velora_api:child_spec()
+        velora_api:child_spec(),
+        #{id => velora_discovery, start => {velora_discovery, start_link, []}}
     ],
     {ok, {SupFlags, Children}}.
