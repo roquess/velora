@@ -51,6 +51,7 @@ stop(Pid) -> gen_server:stop(Pid).
 
 init({Tiles, Ctx, OnDone, OnFail}) ->
     Bins = maps:get(bins, Ctx, 1),
+    velora_jobs:register(self()),
     {ok, #state{queue = [{T, 0} || T <- Tiles], ctx = Ctx, total = length(Tiles),
                 leases = #{}, done = #{}, stats = velora_stats:empty(Bins),
                 max_attempts = ?MAX_ATTEMPTS, on_done = OnDone, on_fail = OnFail,
@@ -84,7 +85,8 @@ handle_cast({ack, WorkerPid, Tile, Partial},
             St2 = case Partial of undefined -> St; _ -> velora_stats:merge(St, Partial) end,
             S2  = S1#state{done = D2, stats = St2},
             case map_size(D2) of
-                Tot -> _ = OnDone(done_tiles(D2),
+                Tot -> velora_jobs:unregister(self()),
+                       _ = OnDone(done_tiles(D2),
                                   velora_stats:finalize(St2, maps:get(range, Ctx, undefined))),
                        {noreply, S2};
                 _   -> {noreply, S2}
@@ -101,7 +103,8 @@ handle_info({'DOWN', MRef, process, WorkerPid, _Reason},
                 true  -> {noreply, S#state{leases = L2}};
                 false ->
                     case A + 1 >= Max of
-                        true  -> _ = OnFail({poison_tile, T}),
+                        true  -> velora_jobs:unregister(self()),
+                                 _ = OnFail({poison_tile, T}),
                                  {noreply, S#state{leases = L2, failed = true}};
                         false -> {noreply, S#state{leases = L2, queue = Q ++ [{T, A + 1}]}}
                     end
