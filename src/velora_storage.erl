@@ -2,7 +2,8 @@
 %%% writes, and VRT->COG assembly. GDAL is driven via spawn_executable, never a shell.
 -module(velora_storage).
 
--export([to_vsi/1, tile_ullr/2, scene_meta/1, write_tile/6, assemble/2]).
+-export([to_vsi/1, tile_ullr/2, scene_meta/1, write_tile/6, assemble/2,
+         ensure_gdal_env/0]).
 
 -define(TIMEOUT, 120000).
 
@@ -84,6 +85,26 @@ assemble(OutVsi, TilePaths) ->
         {error, E} ->
             _ = [file:delete(P) || P <- [Vrt, List]],
             {error, {buildvrt_failed, E}}
+    end.
+
+%% @doc Set PROJ/GDAL data-dir env at the node level (idempotent) so every child
+%% GDAL process — velora's own and rast_gdal's — can find proj.db / gdal-data.
+-spec ensure_gdal_env() -> ok.
+ensure_gdal_env() ->
+    Dir = gdal_dir(),
+    case Dir of
+        "" -> ok;
+        _  ->
+            set_if_unset("PROJ_LIB",  filename:join(Dir, "projlib")),
+            set_if_unset("PROJ_DATA", filename:join(Dir, "projlib")),
+            set_if_unset("GDAL_DATA", filename:join(Dir, "gdal-data")),
+            ok
+    end.
+
+set_if_unset(Var, Val) ->
+    case os:getenv(Var) of
+        false -> case filelib:is_dir(Val) of true -> os:putenv(Var, Val); false -> false end;
+        _     -> true
     end.
 
 %%% --- GDAL exec plumbing (mirrors rast_gdal) ---
