@@ -1,0 +1,15 @@
+{application, velora, [
+    {description, "Distributed satellite raster processing tool"},
+    {vsn, "0.1.0"},
+    {registered, [velora_sup, velora_job_manager, velora_worker_pool]},
+    {mod, {velora_app, []}},
+    {applications, [kernel, stdlib, inets, ssl, cowboy, jsx, rast]},
+    {env, [
+        {http_port, 8080},
+        {peers, []},
+        {tile, {512, 512}},
+        {workers_per_node, undefined}
+    ]},
+    {modules, []},
+    {licenses, ["Apache-2.0"]}
+]}.
