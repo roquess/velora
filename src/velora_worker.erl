@@ -21,6 +21,9 @@ loop(Coordinator, Ctx, Handles) ->
     case velora_coordinator:next_tile(Coordinator) of
         done ->
             ok;
+        wait ->
+            timer:sleep(50),
+            loop(Coordinator, Ctx, Handles);
         {ok, Tile} ->
             Partial = process_tile(Ctx, Handles, Tile),
             velora_coordinator:ack(Coordinator, Tile, Partial),

@@ -74,8 +74,10 @@ start_job(#{op := Op, sources := Sources, out_uri := OutUri} = Req) ->
                         Paths = [tile_path(OutBase, X, Y) || #{x := X, y := Y} <- Acked],
                         gen_server:cast(Mgr, {completed, Id, Paths, Stats})
                     end,
+                    OnFail = fun(Reason) -> gen_server:cast(Mgr, {failed, Id, Reason}) end,
                     {ok, C} = velora_coordinator:start_link(
-                                #{tiles => Tiles, ctx => Ctx, on_done => OnDone}),
+                                #{tiles => Tiles, ctx => Ctx,
+                                  on_done => OnDone, on_fail => OnFail}),
                     announce(C),
                     {ok, #job{id = Id, total = length(Tiles), coord = C, out_vsi = OutVsi}};
                 {error, E} -> {error, E}
