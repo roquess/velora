@@ -35,7 +35,7 @@ init(Req, job) ->
 decode_submit(Body) ->
     try
         M = jsx:decode(Body, [return_maps]),
-        Op = binary_to_atom(maps:get(<<"op">>, M), utf8),
+        Op = binary_to_existing_atom(maps:get(<<"op">>, M), utf8),
         Sources = [#{uri => maps:get(<<"uri">>, S), 'band' => maps:get(<<"band">>, S)}
                    || S <- maps:get(<<"sources">>, M)],
         Req0 = #{op => Op, sources => Sources, out_uri => maps:get(<<"out_uri">>, M)},
