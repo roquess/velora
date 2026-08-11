@@ -33,7 +33,13 @@ ndvi_end_to_end(Config) ->
     true = filelib:is_regular(Out),
     {ok, M} = velora_storage:scene_meta(Out),
     16 = maps:get(width, M),
-    <<"Float32">> = maps:get(dtype, M).
+    <<"Float32">> = maps:get(dtype, M),
+    #{status := done, stats := Stats} = velora_job_manager:status(Id),
+    true = is_map(Stats),
+    true = abs(maps:get(mean, Stats) - (1.0/3.0)) < 1.0e-4,
+    true = maps:get(stddev, Stats) < 1.0e-4,
+    #{histogram := #{bins := 64, counts := Counts}} = Stats,
+    true = lists:sum(Counts) =:= 16*16.
 
 poll(_Id, 0) -> {error, timeout};
 poll(Id, N) ->

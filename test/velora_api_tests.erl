@@ -35,7 +35,12 @@ do_api_submit() ->
             {url(Port,"/jobs"), [], "application/json", Body}, [], []),
         #{<<"job_id">> := JobId} = jsx:decode(list_to_binary(RB), [return_maps]),
         ok = poll(Port, JobId, 60),
-        ?assert(filelib:is_regular(Out))
+        ?assert(filelib:is_regular(Out)),
+        {ok, {{_,200,_},_,SB}} = httpc:request(get, {url(Port,"/jobs/"++binary_to_list(JobId)), []}, [], []),
+        #{<<"stats">> := S} = jsx:decode(list_to_binary(SB), [return_maps]),
+        ?assert(is_map(S)),
+        ?assert(abs(maps:get(<<"mean">>, S) - (1.0/3.0)) < 1.0e-4),
+        #{<<"histogram">> := #{<<"bins">> := 64}} = S
     after application:stop(velora) end.
 
 poll(_P,_J,0) -> {error,timeout};
