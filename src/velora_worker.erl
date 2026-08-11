@@ -1,33 +1,57 @@
-%%% @doc A worker drains a coordinator: pull tile -> read each source window ->
-%%% run the op's rast kernel -> write a georeferenced result tile -> ack. Repeats
-%%% until the coordinator reports `done'. Reads/writes go to object storage; tile
-%%% pixels never travel between nodes.
+%%% @doc A persistent, self-discovering worker. Each worker loops forever: pick
+%%% an active job from the `velora_jobs' pg registry, drain it fully (pull tile
+%%% -> read each source window -> run the op's rast kernel -> write a
+%%% georeferenced result tile -> ack), repeating until the coordinator reports
+%%% `done', then pick another job. When no job is active, idle-wait. If the
+%%% chosen coordinator dies mid-drain (or anything else throws), the error is
+%%% caught and the worker simply moves on to pick again -- the worker process
+%%% itself never crashes on a job failure. Reads/writes go to object storage;
+%%% tile pixels never travel between nodes.
 -module(velora_worker).
--export([start_link/1, run/1]).
+-export([start_link/0, run/0]).
 
--spec start_link(pid()) -> {ok, pid()}.
-start_link(Coordinator) when is_pid(Coordinator) ->
-    {ok, spawn_link(?MODULE, run, [Coordinator])}.
+-define(IDLE_MS, 200).
+-define(WAIT_MS, 50).
+
+-spec start_link() -> {ok, pid()}.
+start_link() ->
+    {ok, spawn_link(?MODULE, run, [])}.
 
 %% @private
--spec run(pid()) -> ok.
-run(Coordinator) ->
-    {ok, Ctx} = velora_coordinator:job_ctx(Coordinator),
-    Handles = open_sources(Ctx),
-    loop(Coordinator, Ctx, Handles),
-    ok.
+-spec run() -> no_return().
+run() ->
+    case pick() of
+        none -> timer:sleep(?IDLE_MS);
+        C    -> serve(C)
+    end,
+    run().
 
-loop(Coordinator, Ctx, Handles) ->
-    case velora_coordinator:next_tile(Coordinator) of
+pick() ->
+    case velora_jobs:active() of
+        [] -> none;
+        Cs -> lists:nth(rand:uniform(length(Cs)), Cs)
+    end.
+
+serve(C) ->
+    try
+        {ok, Ctx} = velora_coordinator:job_ctx(C),
+        Handles = open_sources(Ctx),
+        drain(C, Ctx, Handles)
+    catch
+        _:_ -> ok
+    end.
+
+drain(C, Ctx, Handles) ->
+    case velora_coordinator:next_tile(C) of
         done ->
             ok;
         wait ->
-            timer:sleep(50),
-            loop(Coordinator, Ctx, Handles);
+            timer:sleep(?WAIT_MS),
+            drain(C, Ctx, Handles);
         {ok, Tile} ->
             Partial = process_tile(Ctx, Handles, Tile),
-            velora_coordinator:ack(Coordinator, Tile, Partial),
-            loop(Coordinator, Ctx, Handles)
+            velora_coordinator:ack(C, Tile, Partial),
+            drain(C, Ctx, Handles)
     end.
 
 open_sources(#{sources := Sources}) ->

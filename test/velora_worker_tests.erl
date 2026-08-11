@@ -17,30 +17,36 @@ worker_ndvi_test_() ->
         end
     end}.
 
+with_scope(F) ->
+    {ok, Pid} = pg:start_link(velora_jobs:scope()),
+    try F() after gen_server:stop(Pid) end.
+
 do_worker_ndvi() ->
-    Dir = os:getenv("TMP"),
-    Scene = make_2band_u16(Dir, "wscene", 8, 8),
-    OutBase = filename:join(Dir, "wout_" ++ integer_to_list(erlang:unique_integer([positive]))),
-    filelib:ensure_dir(OutBase ++ "/x"),
-    {ok, M} = velora_storage:scene_meta(Scene),
-    Ctx = #{op => ndvi,
-            out_base => OutBase,
-            sources => [#{uri => list_to_binary(Scene), 'band' => 1},
-                        #{uri => list_to_binary(Scene), 'band' => 2}],
-            gt => maps:get(gt, M), srs => maps:get(srs, M), dtype => maps:get(dtype, M),
-            range => {-1.0, 1.0}, bins => 64},
-    Tiles = rast_tiling:tile_grid(8, 8, 4, 4),
-    Parent = self(),
-    {ok, C} = velora_coordinator:start_link(
-                #{tiles => Tiles, ctx => Ctx,
-                  on_done => fun(A, _Stats) -> Parent ! {done, length(A)} end}),
-    {ok, _W} = velora_worker:start_link(C),
-    receive {done, N} -> ?assertEqual(length(Tiles), N)
-    after 60000 -> ?assert(false) end,
-    Files = filelib:wildcard(OutBase ++ "/tile_*.tif"),
-    ?assertEqual(length(Tiles), length(Files)),
-    {ok, MO} = velora_storage:scene_meta(hd(Files)),
-    ?assertEqual(<<"Float32">>, maps:get(dtype, MO)).
+    with_scope(fun() ->
+        Dir = os:getenv("TMP"),
+        Scene = make_2band_u16(Dir, "wscene", 8, 8),
+        OutBase = filename:join(Dir, "wout_" ++ integer_to_list(erlang:unique_integer([positive]))),
+        filelib:ensure_dir(OutBase ++ "/x"),
+        {ok, M} = velora_storage:scene_meta(Scene),
+        Ctx = #{op => ndvi,
+                out_base => OutBase,
+                sources => [#{uri => list_to_binary(Scene), 'band' => 1},
+                            #{uri => list_to_binary(Scene), 'band' => 2}],
+                gt => maps:get(gt, M), srs => maps:get(srs, M), dtype => maps:get(dtype, M),
+                range => {-1.0, 1.0}, bins => 64},
+        Tiles = rast_tiling:tile_grid(8, 8, 4, 4),
+        Parent = self(),
+        {ok, _C} = velora_coordinator:start_link(
+                    #{tiles => Tiles, ctx => Ctx,
+                      on_done => fun(A, _Stats) -> Parent ! {done, length(A)} end}),
+        {ok, _W} = velora_worker:start_link(),
+        receive {done, N} -> ?assertEqual(length(Tiles), N)
+        after 60000 -> ?assert(false) end,
+        Files = filelib:wildcard(OutBase ++ "/tile_*.tif"),
+        ?assertEqual(length(Tiles), length(Files)),
+        {ok, MO} = velora_storage:scene_meta(hd(Files)),
+        ?assertEqual(<<"Float32">>, maps:get(dtype, MO))
+    end).
 
 %% 2-band UInt16 GeoTIFF, band1 = 200 (NIR), band2 = 100 (Red), constants.
 make_2band_u16(Dir, Name, W, H) ->

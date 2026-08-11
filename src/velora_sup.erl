@@ -11,7 +11,8 @@ init([]) ->
     Children = [
         #{id => velora_pg, start => {pg, start_link, [velora_jobs:scope()]}},
         #{id => velora_worker_pool,
-          start => {velora_worker_pool, start_link, []}},
+          start => {velora_worker_pool, start_link, []},
+          type => supervisor},
         #{id => velora_job_manager,
           start => {velora_job_manager, start_link, []}},
         velora_api:child_spec()

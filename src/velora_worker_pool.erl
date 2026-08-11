@@ -1,27 +1,19 @@
-%%% @doc One pool per node. Registered under a fixed local name so a coordinator
-%%% on any node can announce a job to it. On `take/1' it starts N workers that
-%%% drain the given coordinator (N = configured workers-per-node).
+%%% @doc One pool per node. A supervisor over a fixed set of N persistent
+%%% `velora_worker' children (N = configured workers-per-node) that
+%%% self-discover and drain active jobs via the `velora_jobs' pg registry.
+%%% A crashed worker is restarted to keep the pool at N.
 -module(velora_worker_pool).
--behaviour(gen_server).
+-behaviour(supervisor).
 
--export([start_link/0, take/1, take/2]).
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+-export([start_link/0, init/1]).
 
 start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
--spec take(pid()) -> ok.
-take(Coordinator) -> take(Coordinator, velora_config:workers_per_node()).
-
--spec take(pid(), pos_integer()) -> ok.
-take(Coordinator, N) -> gen_server:cast(?MODULE, {take, Coordinator, N}).
-
-init([]) -> {ok, #{}}.
-
-handle_cast({take, Coordinator, N}, State) ->
-    _ = [velora_worker:start_link(Coordinator) || _ <- lists:seq(1, N)],
-    {noreply, State}.
-
-handle_call(_R, _F, S) -> {reply, ok, S}.
-handle_info(_I, S) -> {noreply, S}.
-terminate(_R, _S) -> ok.
+init([]) ->
+    N = velora_config:workers_per_node(),
+    Children = [#{id => {velora_worker, I},
+                  start => {velora_worker, start_link, []},
+                  restart => permanent, shutdown => 5000, type => worker}
+                || I <- lists:seq(1, N)],
+    {ok, {#{strategy => one_for_one, intensity => max(1, N) * 4, period => 10}, Children}}.

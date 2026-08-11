@@ -1,6 +1,6 @@
 %%% @doc Accepts jobs, builds the job context (scene metadata + tile grid), starts
-%%% a coordinator, announces the job to every node's worker pool, and assembles the
-%%% output COG on completion. Job state is in-memory (persistence is a later slice).
+%%% a coordinator, and assembles the output COG on completion. Job state is
+%%% in-memory (persistence is a later slice).
 -module(velora_job_manager).
 -behaviour(gen_server).
 
@@ -78,7 +78,6 @@ start_job(#{op := Op, sources := Sources, out_uri := OutUri} = Req) ->
                     {ok, C} = velora_coordinator:start_link(
                                 #{tiles => Tiles, ctx => Ctx,
                                   on_done => OnDone, on_fail => OnFail}),
-                    announce(C),
                     {ok, #job{id = Id, total = length(Tiles), coord = C, out_vsi = OutVsi}};
                 {error, E} -> {error, E}
             end;
@@ -97,13 +96,6 @@ resolve_stats(Op, Req) ->
 
 default_stats(ndvi) -> {{-1.0, 1.0}, 64};
 default_stats(_)    -> undefined.
-
-announce(Coordinator) ->
-    _ = velora_worker_pool:take(Coordinator),
-    N = velora_config:workers_per_node(),
-    [gen_server:cast({velora_worker_pool, Node}, {take, Coordinator, N})
-     || Node <- nodes()],
-    ok.
 
 tile_path(OutBase, X, Y) ->
     filename:join(OutBase, lists:flatten(io_lib:format("tile_~w_~w.tif", [X, Y]))).
