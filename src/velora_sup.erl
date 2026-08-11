@@ -12,6 +12,7 @@ init([]) ->
         #{id => velora_worker_pool,
           start => {velora_worker_pool, start_link, []}},
         #{id => velora_job_manager,
-          start => {velora_job_manager, start_link, []}}
+          start => {velora_job_manager, start_link, []}},
+        velora_api:child_spec()
     ],
     {ok, {SupFlags, Children}}.

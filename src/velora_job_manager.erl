@@ -96,7 +96,13 @@ job_view(#job{id = Id, status = St, total = T, coord = C, out_vsi = O, error = E
                false -> T
            end,
     #{job_id => Id, status => St, progress => #{done => Done, total => T},
-      result_uri => O, error => E}.
+      result_uri => uri_bin(O), error => err_json(E)}.
+
+uri_bin(O) when is_list(O) -> list_to_binary(O);
+uri_bin(B) -> B.
+
+err_json(undefined) -> null;
+err_json(E) -> iolist_to_binary(io_lib:format("~p", [E])).
 
 new_id() ->
     list_to_binary(integer_to_list(erlang:system_time(millisecond))
