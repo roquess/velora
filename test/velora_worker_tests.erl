@@ -1,5 +1,6 @@
 -module(velora_worker_tests).
 -include_lib("eunit/include/eunit.hrl").
+-compile([export_all, nowarn_export_all]).
 
 gdal_available() ->
     case velora_storage:scene_meta("/nonexistent") of

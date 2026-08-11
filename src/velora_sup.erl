@@ -8,4 +8,10 @@ start_link() ->
 
 init([]) ->
     SupFlags = #{strategy => one_for_one, intensity => 10, period => 10},
-    {ok, {SupFlags, []}}.
+    Children = [
+        #{id => velora_worker_pool,
+          start => {velora_worker_pool, start_link, []}},
+        #{id => velora_job_manager,
+          start => {velora_job_manager, start_link, []}}
+    ],
+    {ok, {SupFlags, Children}}.
