@@ -1,6 +1,6 @@
 %%% @doc cowboy handler for velora's HTTP surface.
 -module(velora_api_h).
--export([init/2]).
+-export([init/2, decode_submit/1, decode_search/1]).
 
 init(Req, health) ->
     {ok, reply(Req, 200, #{status => <<"ok">>}), health};
@@ -65,16 +65,27 @@ decode_search(Body) ->
 decode_submit(Body) ->
     try
         M = jsx:decode(Body, [return_maps]),
-        Op = binary_to_existing_atom(maps:get(<<"op">>, M), utf8),
+        Op = decode_op(M),
         Sources = [#{uri => maps:get(<<"uri">>, S), 'band' => maps:get(<<"band">>, S)}
                    || S <- maps:get(<<"sources">>, M)],
         Req0 = #{op => Op, sources => Sources, out_uri => maps:get(<<"out_uri">>, M)},
-        Req1 = case maps:get(<<"tile">>, M, undefined) of
-                   [TW, TH] -> Req0#{tile => {TW, TH}};
-                   _ -> Req0
-               end,
-        {ok, Req1}
+        Req1 = with_tile(M, Req0),
+        Req2 = with_stats(M, Req1),
+        {ok, Req2}
     catch _:_ -> {error, bad_request} end.
+
+decode_op(#{<<"op">> := <<"decode">>} = M) -> {decode, num(maps:get(<<"scale">>, M))};
+decode_op(#{<<"op">> := Op})               -> binary_to_existing_atom(Op, utf8).
+
+with_tile(#{<<"tile">> := [TW, TH]}, Req) -> Req#{tile => {TW, TH}};
+with_tile(_, Req) -> Req.
+
+with_stats(#{<<"stats">> := #{<<"range">> := [Lo, Hi], <<"bins">> := B}}, Req) ->
+    Req#{stats => #{range => {float(Lo), float(Hi)}, bins => B}};
+with_stats(_, Req) -> Req.
+
+num(N) when is_integer(N) -> float(N);
+num(N) -> N.
 
 reply(Req, Code, Map) ->
     cowboy_req:reply(Code, #{<<"content-type">> => <<"application/json">>},

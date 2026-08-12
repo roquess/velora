@@ -61,3 +61,21 @@ poll(P,J,N) ->
     end.
 
 url(Port, Path) -> "http://127.0.0.1:" ++ integer_to_list(Port) ++ Path.
+
+decode_submit_ndvi_test() ->
+    Body = jsx:encode(#{op => <<"ndvi">>,
+        sources => [#{uri => <<"file:///a.tif">>, 'band' => 1},
+                    #{uri => <<"file:///a.tif">>, 'band' => 2}],
+        out_uri => <<"file:///out.tif">>, tile => [4, 4]}),
+    {ok, Req} = velora_api_h:decode_submit(Body),
+    ?assertEqual(ndvi, maps:get(op, Req)),
+    ?assertEqual({4, 4}, maps:get(tile, Req)).
+
+decode_submit_decode_test() ->
+    Body = jsx:encode(#{op => <<"decode">>, scale => 2.5,
+        sources => [#{uri => <<"file:///a.tif">>, 'band' => 1}],
+        out_uri => <<"file:///out.tif">>,
+        stats => #{range => [0.0, 1000.0], bins => 32}}),
+    {ok, Req} = velora_api_h:decode_submit(Body),
+    ?assertEqual({decode, 2.5}, maps:get(op, Req)),
+    ?assertEqual(#{range => {0.0, 1000.0}, bins => 32}, maps:get(stats, Req)).
