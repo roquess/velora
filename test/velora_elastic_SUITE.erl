@@ -8,6 +8,7 @@ all() -> [late_node_contributes].
 init_per_suite(Config) ->
     case net_kernel:get_state() of
         #{started := no} ->
+            _ = os:cmd("epmd -daemon"),
             {ok, _} = net_kernel:start(velora_elastic_ct, #{name_domain => shortnames});
         _ -> ok
     end,
