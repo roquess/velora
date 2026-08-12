@@ -47,3 +47,13 @@ poll_done(JobId, N) ->
         #{status := error} = S -> {error, S};
         _ -> timer:sleep(1000), poll_done(JobId, N - 1)
     end.
+
+evict_expired_test() ->
+    Now = 1000000,
+    Fresh   = velora_job_manager:test_job(<<"a">>, done, Now - 10),
+    Stale   = velora_job_manager:test_job(<<"b">>, done, Now - 999999),
+    Running = velora_job_manager:test_job(<<"c">>, running, undefined),
+    Jobs = #{<<"a">> => Fresh, <<"b">> => Stale, <<"c">> => Running},
+    {Kept, Dropped} = velora_job_manager:evict_expired(Jobs, Now, 1000),
+    ?assertEqual([<<"b">>], lists:sort(Dropped)),
+    ?assertEqual([<<"a">>, <<"c">>], lists:sort(maps:keys(Kept))).
