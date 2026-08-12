@@ -29,4 +29,51 @@ jobs:
       - name: Common Test
         run: rebar3 ct
 
-# CI: build, unit + common tests (GDAL installed on the runner).
+  s3-integration:
+    runs-on: ubuntu-latest
+    services:
+      minio:
+        image: bitnami/minio:latest
+        ports:
+          - 9000:9000
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+    env:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_S3_ENDPOINT: localhost:9000
+      AWS_VIRTUAL_HOSTING: "FALSE"
+      AWS_HTTPS: "NO"
+      VELORA_S3_BUCKET: velora-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '27'
+          rebar3-version: '3'
+
+      - name: Install GDAL
+        run: sudo apt-get update && sudo apt-get install -y gdal-bin
+
+      - name: Wait for MinIO
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:9000/minio/health/live && exit 0
+            sleep 2
+          done
+          echo "MinIO did not become healthy" && exit 1
+
+      - name: Create bucket
+        run: |
+          aws --endpoint-url http://localhost:9000 s3 mb s3://velora-test || true
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: S3 integration (CT)
+        run: rebar3 ct --suite test/velora_s3_SUITE
+
+# CI: build, unit + common tests (GDAL installed on the runner); a separate
+# s3-integration job exercises the /vsis3 data plane against a MinIO service.

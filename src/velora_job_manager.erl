@@ -75,7 +75,13 @@ start_job(#{op := Op, sources := Sources, out_uri := OutUri} = Req) ->
                     Id = new_id(),
                     OutVsi = velora_storage:to_vsi(OutUri),
                     OutBase = filename:rootname(OutVsi) ++ "_tiles",
-                    _ = filelib:ensure_dir(filename:join(OutBase, "x")),
+                    %% Object storage (/vsis3, /vsigs) is a flat keyspace with no
+                    %% directories to pre-create; ensure_dir only makes sense for a
+                    %% local filesystem output.
+                    _ = case is_vsi(OutBase) of
+                            true  -> ok;
+                            false -> filelib:ensure_dir(filename:join(OutBase, "x"))
+                        end,
                     Tiles = rast_tiling:tile_grid(W, H, TW, TH),
                     Ctx = #{op => Op, out_base => OutBase, sources => Sources,
                             gt => GT, srs => Srs, dtype => DType,
@@ -107,6 +113,11 @@ resolve_stats(Op, Req) ->
 
 default_stats(ndvi) -> {{-1.0, 1.0}, 64};
 default_stats(_)    -> undefined.
+
+is_vsi("/vsis3/" ++ _) -> true;
+is_vsi("/vsigs/" ++ _) -> true;
+is_vsi("/vsicurl/" ++ _) -> true;
+is_vsi(_) -> false.
 
 tile_path(OutBase, X, Y) ->
     filename:join(OutBase, lists:flatten(io_lib:format("tile_~w_~w.tif", [X, Y]))).
