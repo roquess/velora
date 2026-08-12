@@ -149,3 +149,19 @@ lease_sweep_test() ->
     {ok, T2} = velora_coordinator:next_tile(C),
     ?assertEqual(T, T2),
     velora_coordinator:stop(C).
+
+%% Two tiles both poison the job; on_fail must fire exactly once.
+double_poison_single_fail_test() ->
+    C = start(tiles(2), #{}),
+    Drain = fun Loop() ->
+        case velora_coordinator:next_tile(C) of
+            {ok, T} -> velora_coordinator:nack(C, T), Loop();
+            _       -> ok
+        end
+    end,
+    Drain(),
+    receive {failed, R} -> ?assertMatch({poison_tile, _}, R)
+    after 2000 -> ?assert(false) end,
+    %% no second failure message
+    receive {failed, _} -> ?assert(false) after 300 -> ok end,
+    velora_coordinator:stop(C).

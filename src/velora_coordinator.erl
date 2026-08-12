@@ -172,6 +172,7 @@ tile_id(Tile) ->
 done_tiles(D) -> maps:values(D).
 
 %% Requeue-or-poison one failed attempt; a tile already done is dropped.
+fail_attempt(_Tile, _Attempts, #state{failed = true} = S) -> S;
 fail_attempt(Tile, Attempts, #state{done = D, queue = Q, max_attempts = Max,
                                     on_fail = OnFail} = S) ->
     case maps:is_key(key(Tile), D) of
