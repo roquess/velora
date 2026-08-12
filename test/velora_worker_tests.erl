@@ -23,7 +23,7 @@ with_scope(F) ->
 
 do_worker_ndvi() ->
     with_scope(fun() ->
-        Dir = os:getenv("TMP"),
+        Dir = tmp_dir(),
         Scene = make_2band_u16(Dir, "wscene", 8, 8),
         OutBase = filename:join(Dir, "wout_" ++ integer_to_list(erlang:unique_integer([positive]))),
         filelib:ensure_dir(OutBase ++ "/x"),
@@ -65,6 +65,17 @@ make_2band_u16(Dir, Name, W, H) ->
                            "-of", "GTiff", Raw, Tif]}, binary, exit_status, in]),
     ok = wait(P),
     Tif.
+
+%% Portable temp dir: TMP (Windows), TMPDIR (POSIX), then /tmp.
+tmp_dir() ->
+    case os:getenv("TMP") of
+        false ->
+            case os:getenv("TMPDIR") of
+                false -> "/tmp";
+                D -> D
+            end;
+        D -> D
+    end.
 
 gdal(N) ->
     Ext = case os:type() of {win32,_} -> ".exe"; _ -> "" end,

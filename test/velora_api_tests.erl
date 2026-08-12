@@ -23,7 +23,7 @@ do_api_submit() ->
     {ok, _} = application:ensure_all_started(velora),
     try
         Port = velora_config:http_port(),
-        Dir = os:getenv("TMP"),
+        Dir = velora_worker_tests:tmp_dir(),
         Scene = velora_worker_tests:make_2band_u16(Dir, "apiscene", 8, 8),
         Out = filename:join(Dir, "api_out_" ++ integer_to_list(erlang:unique_integer([positive])) ++ ".tif"),
         Body = jsx:encode(#{op => <<"ndvi">>,

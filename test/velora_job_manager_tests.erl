@@ -20,7 +20,7 @@ with_apps(F) ->
     try F() after application:stop(velora) end.
 
 do_submit() ->
-    Dir = os:getenv("TMP"),
+    Dir = velora_worker_tests:tmp_dir(),
     Scene = velora_worker_tests:make_2band_u16(Dir, "jmscene", 12, 12),
     Out = filename:join(Dir, "jm_ndvi_" ++ integer_to_list(erlang:unique_integer([positive])) ++ ".tif"),
     Req = #{op => ndvi,

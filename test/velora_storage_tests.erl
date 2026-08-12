@@ -32,7 +32,7 @@ roundtrip_test_() ->
     end}.
 
 do_roundtrip() ->
-    Dir = os:getenv("TMP"),
+    Dir = velora_worker_tests:tmp_dir(),
     Bin = << <<(float(V)):32/float-little>> || V <- lists:seq(1, 16) >>,
     Path = filename:join(Dir, "vstore.tif"),
     ok = velora_storage:write_tile(Path, Bin, 4, 4, "EPSG:4326",
