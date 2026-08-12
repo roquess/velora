@@ -60,16 +60,21 @@ ndvi_over_s3(_Config) ->
 gdal_copy(Src, DstVsi) ->
     Exe = filename:nativename(velora_worker_tests:gdal("gdal_translate")),
     P = open_port({spawn_executable, Exe},
-                  [{args, ["-q", "-of", "GTiff", Src, DstVsi]},
+                  [{args, ["-of", "GTiff", Src, DstVsi]},
                    binary, exit_status, stderr_to_stdout, in]),
-    wait(P).
+    case wait(P, <<>>) of
+        {ok, _} -> ok;
+        {error, N, Out} ->
+            ct:pal("gdal_translate -> /vsis3 failed (~p):~n~ts", [N, Out]),
+            {error, {gdal_translate, N}}
+    end.
 
-wait(P) ->
+wait(P, Acc) ->
     receive
-        {P, {data, _}}         -> wait(P);
-        {P, {exit_status, 0}}  -> ok;
-        {P, {exit_status, N}}  -> {error, {gdal_translate, N}}
-    after 60000 -> {error, timeout} end.
+        {P, {data, D}}         -> wait(P, <<Acc/binary, D/binary>>);
+        {P, {exit_status, 0}}  -> {ok, Acc};
+        {P, {exit_status, N}}  -> {error, N, Acc}
+    after 60000 -> {error, timeout, Acc} end.
 
 poll(_Job, 0) -> #{status => timeout};
 poll(Job, N) ->
