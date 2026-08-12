@@ -30,7 +30,37 @@ init(Req, job) ->
     case velora_job_manager:status(Id) of
         {error, not_found} -> {ok, reply(Req, 404, #{error => <<"not_found">>}), job};
         View               -> {ok, reply(Req, 200, View), job}
+    end;
+init(Req0, search) ->
+    Id = cowboy_req:binding(id, Req0),
+    {ok, Body, Req1} = cowboy_req:read_body(Req0),
+    case decode_search(Body) of
+        {ok, Query, K} ->
+            case velora_job_manager:search(Id, Query, K) of
+                {ok, Results} ->
+                    Rs = [#{tile_id => TileId, score => Score} || {TileId, Score} <- Results],
+                    {ok, reply(Req1, 200, #{results => Rs}), search};
+                {error, not_ready} ->
+                    {ok, reply(Req1, 409, #{error => <<"not_ready">>}), search};
+                {error, not_found} ->
+                    {ok, reply(Req1, 404, #{error => <<"not_found">>}), search};
+                {error, E} ->
+                    {ok, reply(Req1, 400, #{error => errbin(E)}), search}
+            end;
+        {error, R} ->
+            {ok, reply(Req1, 400, #{error => errbin(R)}), search}
     end.
+
+decode_search(Body) ->
+    try
+        M = jsx:decode(Body, [return_maps]),
+        K = maps:get(<<"k">>, M, 10),
+        case M of
+            #{<<"tile">> := T}   -> {ok, {tile, T}, K};
+            #{<<"vector">> := V} -> {ok, {vector, V}, K};
+            _ -> {error, missing_tile_or_vector}
+        end
+    catch _:_ -> {error, bad_request} end.
 
 decode_submit(Body) ->
     try

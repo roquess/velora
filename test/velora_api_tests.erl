@@ -40,7 +40,15 @@ do_api_submit() ->
         #{<<"stats">> := S} = jsx:decode(list_to_binary(SB), [return_maps]),
         ?assert(is_map(S)),
         ?assert(abs(maps:get(<<"mean">>, S) - (1.0/3.0)) < 1.0e-4),
-        #{<<"histogram">> := #{<<"bins">> := 64}} = S
+        #{<<"histogram">> := #{<<"bins">> := 64}} = S,
+        SBody = jsx:encode(#{tile => <<"0_0">>, k => 4}),
+        {ok, {{_,200,_},_,RB2}} = httpc:request(post,
+            {url(Port,"/jobs/"++binary_to_list(JobId)++"/search"), [], "application/json", SBody}, [], []),
+        #{<<"results">> := Results} = jsx:decode(list_to_binary(RB2), [return_maps]),
+        ?assert(is_list(Results)),
+        ?assert(length(Results) >= 1),
+        #{<<"score">> := TopScore} = hd(Results),
+        ?assert(abs(TopScore - 1.0) < 1.0e-4)
     after application:stop(velora) end.
 
 poll(_P,_J,0) -> {error,timeout};

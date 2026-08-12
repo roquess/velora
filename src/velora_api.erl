@@ -10,7 +10,8 @@ child_spec() ->
             {"/health",     velora_api_h, health},
             {"/cluster",    velora_api_h, cluster},
             {"/jobs",       velora_api_h, jobs},
-            {"/jobs/:id",   velora_api_h, job}
+            {"/jobs/:id",   velora_api_h, job},
+            {"/jobs/:id/search", velora_api_h, search}
         ]}
     ]),
     ranch:child_spec(velora_http, ranch_tcp, #{socket_opts => [{port, Port}]},
