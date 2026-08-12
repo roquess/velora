@@ -4,7 +4,10 @@
 library: you run it as a cluster of connected Erlang nodes behind an HTTP API,
 submit a satellite scene plus an operation, and velora spreads that scene's tiles
 across the whole cluster, processes each tile on whatever node picked it up, and
-assembles a georeferenced GeoTIFF result.
+assembles a georeferenced GeoTIFF result — alongside a reduction (summary stats +
+histogram) and a per-tile k-NN index you can query for similar regions. Nodes can
+join or die mid-job: work is reassigned so the result is always complete and
+exactly-once.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
@@ -21,14 +24,23 @@ shape velora:
     straight back. Data flows storage ↔ node, never node ↔ node.
   - **Control plane:** the Erlang cluster carries only tiny messages — tile
     descriptors (`{x, y, w, h}`) and acknowledgements.
-- **Demand-driven pull for latency.** A per-job coordinator holds a queue of
-  tiles; workers on every node pull the next tile when they have a free core. A
-  faster or less-loaded node naturally pulls more, so one scene finishes as fast
-  as the whole cluster can carry it.
+- **Demand-driven pull for latency.** A per-job coordinator leases tiles; a fixed
+  pool of workers on every node pulls the next tile when it has a free core and
+  self-discovers active jobs through an OTP `pg` registry. A faster or less-loaded
+  node naturally pulls more, so one scene finishes as fast as the whole cluster can
+  carry it, and a node that joins mid-job starts contributing immediately.
+- **Fault tolerance, exactly-once.** The coordinator monitors each worker; if one
+  dies mid-tile (or its whole node leaves), that tile is reassigned. Tile outputs
+  are written to deterministic names (idempotent) and acks are deduped, so every
+  tile lands in the raster once and is counted once in the reduction — regardless
+  of failures or reassignments. A tile that repeatedly crashes workers fails the
+  job cleanly instead of looping.
 
 The pixel crunching is a thin, fast kernel from
 [rast](https://hex.pm/packages/rast) (SIMD NDVI, windowed GDAL I/O, tile
-geometry). velora adds the distribution, the HTTP surface, and output assembly.
+geometry); similarity search rides on [kvex](https://hex.pm/packages/kvex). velora
+adds the distribution, fault tolerance, the HTTP surface, output assembly, the
+reduction, and the index.
 
 ## Quick start (single node)
 
@@ -49,32 +61,51 @@ curl -XPOST localhost:8080/jobs -H 'content-type: application/json' -d '{
 # -> {"job_id": "1723380000000-42"}
 
 curl localhost:8080/jobs/1723380000000-42
-# -> {"status":"done","progress":{"done":441,"total":441},"result_uri":"..."}
+# -> {"status":"done","progress":{"done":441,"total":441},"result_uri":"...",
+#     "stats":{"count":...,"min":...,"max":...,"mean":...,"stddev":...,
+#              "histogram":{"range":[-1,1],"bins":64,"counts":[...]}}}
 ```
 
-`uri` may be `s3://…` (mapped to GDAL `/vsis3`) or `file://…` for local files.
+`uri` may be `s3://…` (mapped to GDAL `/vsis3`) or `file://…` for local files. The
+completed job carries a **reduction** (`stats`): summary statistics and a histogram
+of the output values, computed as mergeable per-tile partials.
+
+Find tiles similar to a given one (k-NN over per-tile histogram vectors):
+
+```bash
+curl -XPOST localhost:8080/jobs/<job_id>/search \
+  -H 'content-type: application/json' -d '{"tile": "3_5", "k": 10}'
+# -> {"results": [{"tile_id":"3_5","score":1.0}, {"tile_id":"4_5","score":0.98}, ...]}
+```
 
 ## HTTP API
 
-| Method & path      | Purpose                                             |
-|--------------------|-----------------------------------------------------|
-| `POST /jobs`       | Submit a job → `202 {"job_id": …}`                  |
-| `GET  /jobs/:id`   | Job status, progress, and result URI                |
-| `GET  /jobs`       | List jobs                                           |
-| `GET  /cluster`    | Connected nodes                                     |
-| `GET  /health`     | Liveness                                            |
+| Method & path            | Purpose                                             |
+|--------------------------|-----------------------------------------------------|
+| `POST /jobs`             | Submit a job → `202 {"job_id": …}`                  |
+| `GET  /jobs/:id`         | Job status, progress, result URI, and `stats`       |
+| `GET  /jobs`             | List jobs                                           |
+| `POST /jobs/:id/search`  | k-NN similar tiles (`{"tile":"x_y"}` or `{"vector":[…]}`, `"k"`) |
+| `GET  /cluster`          | Connected nodes                                     |
+| `GET  /health`           | Liveness                                            |
 
 ## Running a cluster
 
-Every node runs the same release; submit to any node. List the other nodes in
-`config/sys.config` (`peers`), or start the nodes with a shared cookie and let
-them connect. Only tile descriptors and acks cross the cluster — the pixels stay
-between each node and object storage.
+Every node runs the same release; submit to any node. A `velora_discovery` process
+periodically reconciles membership from a strategy, so nodes join without
+per-request coordination:
 
 ```erlang
 %% config/sys.config
-{peers, ['velora@10.0.0.2', 'velora@10.0.0.3']}
+{discovery, {static}}, {peers, ['velora@10.0.0.2', 'velora@10.0.0.3']}
+%% or, for Kubernetes (Base@<ip> from a headless service's A records):
+{discovery, {dns, "velora-headless", "velora"}}
 ```
+
+Only tile descriptors, acks, and small per-tile vectors cross the cluster — pixels
+stay between each node and object storage. Nodes may join or leave at any time:
+joiners pick up active jobs via the `pg` registry, and a leaver's in-flight tiles
+are reassigned (exactly-once).
 
 ## Requirements
 
@@ -89,16 +120,27 @@ between each node and object storage.
 
 ```bash
 rebar3 compile
-rebar3 eunit        # unit tests (GDAL-backed ones skip if GDAL is absent)
-rebar3 ct           # end-to-end: single-node NDVI + multi-node exactly-once
+rebar3 eunit        # unit tests (GDAL/kvex-backed ones skip if GDAL is absent)
+rebar3 ct           # end-to-end: single-node NDVI, multi-node exactly-once,
+                    # node-death reassignment, and node-join elasticity
 ```
 
-## Scope
+## Capabilities
 
-This is **slice 1**: NDVI, a georeferenced raster output, fail-fast error
-handling, and a statically-configured cluster. Planned next: aggregated
-reductions/stats, fault-tolerant retry on node loss, elastic membership, and
-per-tile kNN indexing via [kvex](https://hex.pm/packages/kvex).
+- **NDVI** over tiled COG scenes → a georeferenced GeoTIFF (`op: "ndvi"`;
+  `op: {"decode", scale}` also available). Adding index kernels is a rast concern.
+- **Reduction**: per-scene count/min/max/mean/stddev + histogram, mergeable per
+  tile, on `GET /jobs/:id`.
+- **Fault tolerance**: worker/node death mid-job → tile reassignment; idempotent
+  writes + ack dedup → exactly-once; poison-tile cap fails a job cleanly.
+- **Elasticity**: fixed per-node worker pool self-discovering jobs via `pg`;
+  periodic membership discovery (static / DNS); a node joining mid-job contributes
+  immediately.
+- **Similarity search**: per-tile k-NN index (L2-normalized histograms via kvex),
+  `POST /jobs/:id/search`.
+
+Not yet: persistence of job state across a coordinator crash; learned (ONNX)
+embeddings as the search feature; zonal statistics.
 
 ## License
 
