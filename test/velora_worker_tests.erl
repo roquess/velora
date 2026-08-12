@@ -79,9 +79,15 @@ tmp_dir() ->
 
 gdal(N) ->
     Ext = case os:type() of {win32,_} -> ".exe"; _ -> "" end,
+    Full = N ++ Ext,
     case os:getenv("GDAL_BIN_DIR") of
-        false -> case os:type() of {win32,_} -> "C:/Program Files/GDAL/" ++ N ++ Ext; _ -> N end;
-        D -> filename:join(D, N ++ Ext)
+        false ->
+            case os:type() of
+                {win32,_} -> "C:/Program Files/GDAL/" ++ Full;
+                %% spawn_executable does not search PATH; resolve to a full path.
+                _ -> case os:find_executable(Full) of false -> Full; P -> P end
+            end;
+        D -> filename:join(D, Full)
     end.
 
 wait(P) -> receive {P,{data,_}} -> wait(P); {P,{exit_status,0}} -> ok;
