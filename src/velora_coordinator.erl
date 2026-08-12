@@ -6,7 +6,8 @@
 -module(velora_coordinator).
 -behaviour(gen_server).
 
--export([start_link/1, next_tile/1, ack/2, ack/3, job_ctx/1, progress/1, search/3, stop/1]).
+-export([start_link/1, next_tile/1, ack/2, ack/3, nack/2, abort/2,
+         job_ctx/1, progress/1, search/3, stop/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(MAX_ATTEMPTS, 3).
@@ -17,12 +18,13 @@
     queue        :: [{rast_tiling:tile(), non_neg_integer()}],
     ctx          :: map(),
     total        :: non_neg_integer(),
-    leases       :: #{pid() => {reference(), rast_tiling:tile(), non_neg_integer()}},
+    leases       :: #{pid() => {reference(), rast_tiling:tile(), non_neg_integer(), integer()}},
     done         :: #{tkey() => rast_tiling:tile()},
     stats        :: velora_stats:partial(),
     vectors      :: [{binary(), [number()]}],
     index        :: term() | undefined,
     max_attempts :: pos_integer(),
+    lease_ttl    :: pos_integer(),
     on_done      :: fun(([rast_tiling:tile()], map()) -> any()),
     on_fail      :: fun((term()) -> any()),
     failed       :: boolean()
@@ -42,6 +44,12 @@ ack(Pid, Tile) -> gen_server:cast(Pid, {ack, self(), Tile, undefined}).
 -spec ack(pid(), rast_tiling:tile(), velora_stats:partial() | undefined) -> ok.
 ack(Pid, Tile, Partial) -> gen_server:cast(Pid, {ack, self(), Tile, Partial}).
 
+-spec nack(pid(), rast_tiling:tile()) -> ok.
+nack(Pid, Tile) -> gen_server:cast(Pid, {nack, self(), Tile}).
+
+-spec abort(pid(), term()) -> ok.
+abort(Pid, Reason) -> gen_server:cast(Pid, {abort, self(), Reason}).
+
 -spec job_ctx(pid()) -> {ok, map()}.
 job_ctx(Pid) -> gen_server:call(Pid, job_ctx, infinity).
 
@@ -57,18 +65,23 @@ stop(Pid) -> gen_server:stop(Pid).
 
 init({Tiles, Ctx, OnDone, OnFail}) ->
     Bins = maps:get(bins, Ctx, 1),
+    Ttl = maps:get(lease_ttl, Ctx, app_lease_ttl()),
     velora_jobs:register(self()),
+    erlang:send_after(sweep_ms(Ttl), self(), sweep),
     {ok, #state{queue = [{T, 0} || T <- Tiles], ctx = Ctx, total = length(Tiles),
                 leases = #{}, done = #{}, stats = velora_stats:empty(Bins),
                 vectors = [], index = undefined,
-                max_attempts = ?MAX_ATTEMPTS, on_done = OnDone, on_fail = OnFail,
-                failed = false}}.
+                max_attempts = ?MAX_ATTEMPTS, lease_ttl = Ttl,
+                on_done = OnDone, on_fail = OnFail, failed = false}}.
 
 handle_call(next_tile, _From, #state{failed = true} = S) ->
     {reply, done, S};
-handle_call(next_tile, {WorkerPid, _}, #state{queue = [{T, A} | Rest], leases = L} = S) ->
+handle_call(next_tile, {WorkerPid, _}, #state{queue = [{T, A} | Rest]} = S0) ->
+    S1 = requeue_existing(WorkerPid, S0#state{queue = Rest}),
     MRef = erlang:monitor(process, WorkerPid),
-    {reply, {ok, T}, S#state{queue = Rest, leases = L#{WorkerPid => {MRef, T, A}}}};
+    Now = erlang:monotonic_time(millisecond),
+    L = S1#state.leases,
+    {reply, {ok, T}, S1#state{leases = L#{WorkerPid => {MRef, T, A, Now}}}};
 handle_call(next_tile, _From, #state{queue = [], done = D, total = Tot} = S)
         when map_size(D) =:= Tot ->
     {reply, done, S};
@@ -112,27 +125,39 @@ handle_cast({ack, WorkerPid, Tile, Partial},
                        {noreply, S2#state{index = Index}};
                 _   -> {noreply, S2}
             end
-    end.
+    end;
+handle_cast({nack, WorkerPid, _Tile}, #state{leases = L} = S) ->
+    case maps:take(WorkerPid, L) of
+        {{MRef, T, A, _}, L2} ->
+            erlang:demonitor(MRef, [flush]),
+            {noreply, fail_attempt(T, A, S#state{leases = L2})};
+        error ->
+            {noreply, S}
+    end;
+handle_cast({abort, _WorkerPid, Reason}, #state{failed = false, on_fail = OnFail} = S) ->
+    velora_jobs:unregister(self()),
+    _ = OnFail({setup_failed, Reason}),
+    {noreply, S#state{failed = true}};
+handle_cast({abort, _WorkerPid, _Reason}, S) ->
+    {noreply, S}.
 
-handle_info({'DOWN', MRef, process, WorkerPid, _Reason},
-            #state{leases = L, done = D, queue = Q, max_attempts = Max,
-                   on_fail = OnFail} = S) ->
+handle_info({'DOWN', MRef, process, WorkerPid, _Reason}, #state{leases = L} = S) ->
     case maps:get(WorkerPid, L, undefined) of
-        {MRef, T, A} ->
-            L2 = maps:remove(WorkerPid, L),
-            case maps:is_key(key(T), D) of
-                true  -> {noreply, S#state{leases = L2}};
-                false ->
-                    case A + 1 >= Max of
-                        true  -> velora_jobs:unregister(self()),
-                                 _ = OnFail({poison_tile, T}),
-                                 {noreply, S#state{leases = L2, failed = true}};
-                        false -> {noreply, S#state{leases = L2, queue = Q ++ [{T, A + 1}]}}
-                    end
-            end;
+        {MRef, T, A, _Start} ->
+            {noreply, fail_attempt(T, A, S#state{leases = maps:remove(WorkerPid, L)})};
         _ ->
             {noreply, S}
     end;
+handle_info(sweep, #state{leases = L, lease_ttl = Ttl} = S) ->
+    Now = erlang:monotonic_time(millisecond),
+    Expired = [P || {P, {_M, _T, _A, Start}} <- maps:to_list(L), Now - Start >= Ttl],
+    S2 = lists:foldl(fun(P, Acc) ->
+             {MRef, T, A, _} = maps:get(P, Acc#state.leases),
+             erlang:demonitor(MRef, [flush]),
+             fail_attempt(T, A, Acc#state{leases = maps:remove(P, Acc#state.leases)})
+         end, S, Expired),
+    erlang:send_after(sweep_ms(Ttl), self(), sweep),
+    {noreply, S2};
 handle_info(_I, S) ->
     {noreply, S}.
 
@@ -146,8 +171,40 @@ tile_id(Tile) ->
 
 done_tiles(D) -> maps:values(D).
 
+%% Requeue-or-poison one failed attempt; a tile already done is dropped.
+fail_attempt(Tile, Attempts, #state{done = D, queue = Q, max_attempts = Max,
+                                    on_fail = OnFail} = S) ->
+    case maps:is_key(key(Tile), D) of
+        true  -> S;
+        false ->
+            case Attempts + 1 >= Max of
+                true  -> velora_jobs:unregister(self()),
+                         _ = OnFail({poison_tile, Tile}),
+                         S#state{failed = true};
+                false -> S#state{queue = Q ++ [{Tile, Attempts + 1}]}
+            end
+    end.
+
+%% If a worker re-leases without acking, requeue its previous tile instead of
+%% silently losing it (and demonitor the stale monitor).
+requeue_existing(WorkerPid, #state{leases = L} = S) ->
+    case maps:take(WorkerPid, L) of
+        {{MRef, OldT, OldA, _}, L2} ->
+            erlang:demonitor(MRef, [flush]),
+            fail_attempt(OldT, OldA, S#state{leases = L2});
+        error -> S
+    end.
+
+sweep_ms(Ttl) -> max(50, Ttl div 2).
+
+app_lease_ttl() ->
+    case application:get_env(velora, lease_ttl_ms) of
+        {ok, N} when is_integer(N), N > 0 -> N;
+        _ -> 300000
+    end.
+
 clear_lease(WorkerPid, #state{leases = L} = S) ->
     case maps:take(WorkerPid, L) of
-        {{MRef, _, _}, L2} -> erlang:demonitor(MRef, [flush]), S#state{leases = L2};
-        error              -> S
+        {{MRef, _, _, _}, L2} -> erlang:demonitor(MRef, [flush]), S#state{leases = L2};
+        error                 -> S
     end.

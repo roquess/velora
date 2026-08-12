@@ -88,3 +88,64 @@ index_search_test() ->
     Ids = [Id || {Id, _} <- R],
     ?assertEqual([<<"0_0">>, <<"1_0">>], lists:sublist(Ids, 2)),
     ?assertEqual(<<"2_0">>, lists:last(Ids)).
+
+%% A coordinator with no pg scope running: velora_jobs:register/unregister
+%% tolerate a missing scope (they wrap pg in try/catch), so these run standalone.
+
+tiles(N) -> [#{x => X, y => 0, w => 1, h => 1} || X <- lists:seq(0, N - 1)].
+
+start(Tiles, Extra) ->
+    Parent = self(),
+    Arg = #{tiles => Tiles,
+            ctx => maps:merge(#{bins => 1, range => {0.0, 1.0}}, Extra),
+            on_done => fun(Acked, _S) -> Parent ! {done, length(Acked)} end,
+            on_fail => fun(R) -> Parent ! {failed, R} end},
+    {ok, C} = velora_coordinator:start_link(Arg),
+    C.
+
+%% nack requeues the tile so another pull gets it; the job still completes.
+nack_requeues_test() ->
+    C = start(tiles(1), #{}),
+    {ok, T} = velora_coordinator:next_tile(C),
+    velora_coordinator:nack(C, T),
+    %% after a nack the tile is back in the queue
+    {ok, T2} = velora_coordinator:next_tile(C),
+    ?assertEqual(T, T2),
+    velora_coordinator:ack(C, T2, undefined),
+    receive {done, N} -> ?assertEqual(1, N) after 2000 -> ?assert(false) end,
+    velora_coordinator:stop(C).
+
+%% A tile nacked past max_attempts fails the job as a poison tile.
+nack_poison_test() ->
+    C = start(tiles(1), #{}),
+    Fail = fun Loop() ->
+        case velora_coordinator:next_tile(C) of
+            {ok, T} -> velora_coordinator:nack(C, T), Loop();
+            _       -> ok
+        end
+    end,
+    Fail(),
+    receive {failed, R} -> ?assertMatch({poison_tile, _}, R)
+    after 2000 -> ?assert(false) end,
+    velora_coordinator:stop(C).
+
+%% abort fails the job exactly once with the given reason.
+abort_test() ->
+    C = start(tiles(3), #{}),
+    velora_coordinator:abort(C, bad_source),
+    receive {failed, R} -> ?assertEqual({setup_failed, bad_source}, R)
+    after 2000 -> ?assert(false) end,
+    %% a second abort does not fire on_fail again
+    velora_coordinator:abort(C, bad_source),
+    receive {failed, _} -> ?assert(false) after 300 -> ok end,
+    velora_coordinator:stop(C).
+
+%% An expired lease (worker took the tile but never acked) is swept and requeued.
+lease_sweep_test() ->
+    C = start(tiles(1), #{lease_ttl => 100}),
+    {ok, T} = velora_coordinator:next_tile(C),
+    %% do NOT ack; wait past the ttl + one sweep interval (sweep = ttl div 2)
+    timer:sleep(400),
+    {ok, T2} = velora_coordinator:next_tile(C),
+    ?assertEqual(T, T2),
+    velora_coordinator:stop(C).
