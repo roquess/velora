@@ -92,3 +92,33 @@ gdal(N) ->
 
 wait(P) -> receive {P,{data,_}} -> wait(P); {P,{exit_status,0}} -> ok;
                    {P,{exit_status,N}} -> {error,N} after 30000 -> {error,timeout} end.
+
+%% A worker that cannot open its sources aborts the job rather than hanging.
+worker_bad_source_test_() ->
+    {timeout, 30, fun() ->
+        velora_storage:ensure_gdal_env(),
+        case gdal_available() of
+            false -> ?debugMsg("GDAL not available, skipping"), ok;
+            true  -> do_worker_bad_source()
+        end
+    end}.
+
+do_worker_bad_source() ->
+    with_scope(fun() ->
+        Parent = self(),
+        Ctx = #{op => ndvi, out_base => tmp_dir(),
+                sources => [#{uri => <<"file:///no/such/scene.tif">>, 'band' => 1},
+                            #{uri => <<"file:///no/such/scene.tif">>, 'band' => 2}],
+                gt => {0.0,1.0,0.0,0.0,0.0,-1.0}, srs => "", dtype => <<"UInt16">>,
+                range => {-1.0, 1.0}, bins => 64},
+        Tiles = rast_tiling:tile_grid(8, 8, 4, 4),
+        {ok, _C} = velora_coordinator:start_link(
+                    #{tiles => Tiles, ctx => Ctx,
+                      on_done => fun(_, _) -> Parent ! done end,
+                      on_fail => fun(R) -> Parent ! {failed, R} end}),
+        {ok, _W} = velora_worker:start_link(),
+        receive
+            {failed, R} -> ?assertMatch({setup_failed, _}, R);
+            done        -> ?assert(false)
+        after 20000 -> ?assert(false) end
+    end).

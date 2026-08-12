@@ -33,12 +33,20 @@ pick() ->
     end.
 
 serve(C) ->
-    try
-        {ok, Ctx} = velora_coordinator:job_ctx(C),
-        Handles = open_sources(Ctx),
-        drain(C, Ctx, Handles)
+    try velora_coordinator:job_ctx(C) of
+        {ok, Ctx} -> serve_job(C, Ctx)
     catch
-        _:_ -> ok
+        _:_ -> ok            %% coordinator gone; just pick again
+    end.
+
+serve_job(C, Ctx) ->
+    case open_sources_safe(Ctx) of
+        {ok, Handles} ->
+            try drain(C, Ctx, Handles)
+            after close_handles(Handles)
+            end;
+        {error, Reason} ->
+            velora_coordinator:abort(C, {open_sources, Reason})
     end.
 
 drain(C, Ctx, Handles) ->
@@ -47,12 +55,29 @@ drain(C, Ctx, Handles) ->
             ok;
         wait ->
             timer:sleep(?WAIT_MS),
-            drain(C, Ctx, Handles);
+            case length(velora_jobs:active()) > 1 of
+                true  -> ok;    %% yield so this worker can help other active jobs
+                false -> drain(C, Ctx, Handles)
+            end;
         {ok, Tile} ->
-            Partial = process_tile(Ctx, Handles, Tile),
-            velora_coordinator:ack(C, Tile, Partial),
+            case process_safe(Ctx, Handles, Tile) of
+                {ok, Partial} -> velora_coordinator:ack(C, Tile, Partial);
+                {error, _}    -> velora_coordinator:nack(C, Tile)
+            end,
             drain(C, Ctx, Handles)
     end.
+
+open_sources_safe(Ctx) ->
+    try {ok, open_sources(Ctx)}
+    catch _:R -> {error, R} end.
+
+process_safe(Ctx, Handles, Tile) ->
+    try {ok, process_tile(Ctx, Handles, Tile)}
+    catch _:R -> {error, R} end.
+
+close_handles(Handles) ->
+    _ = [catch rast_gdal:close(H) || {H, _Band} <- Handles],
+    ok.
 
 open_sources(#{sources := Sources}) ->
     [begin
