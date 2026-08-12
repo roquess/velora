@@ -119,12 +119,16 @@ run(Exe, Args) ->
 %% the installer does not always register PROJ_LIB/PROJ_DATA/GDAL_DATA, and
 %% without them `gdal_translate -a_srs' fails with "Cannot find proj.db".
 gdal_env() ->
+    %% GeoTIFF/COG output needs seekable (w+b) writes, which /vsis3 rejects
+    %% directly; this makes GDAL buffer to a local temp file and upload on close,
+    %% so writing tiles and the assembled COG straight to object storage works.
+    Base = [{"CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE", "YES"}],
     case gdal_dir() of
-        "" -> [];
+        "" -> Base;
         Dir ->
             ProjLib = filename:nativename(filename:join(Dir, "projlib")),
             GdalData = filename:nativename(filename:join(Dir, "gdal-data")),
-            [{"PROJ_LIB", ProjLib}, {"PROJ_DATA", ProjLib}, {"GDAL_DATA", GdalData}]
+            [{"PROJ_LIB", ProjLib}, {"PROJ_DATA", ProjLib}, {"GDAL_DATA", GdalData} | Base]
     end.
 
 collect(Port, Acc) ->
