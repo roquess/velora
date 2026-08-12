@@ -4,7 +4,7 @@
 -module(velora_job_manager).
 -behaviour(gen_server).
 
--export([start_link/0, submit/1, status/1, list/0]).
+-export([start_link/0, submit/1, status/1, list/0, search/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -record(job, {id, status = running, total = 0, coord, out_vsi, tile_paths = [], stats = null, error}).
@@ -20,6 +20,10 @@ status(JobId) -> gen_server:call(?MODULE, {status, JobId}, infinity).
 -spec list() -> [map()].
 list() -> gen_server:call(?MODULE, list, infinity).
 
+-spec search(binary(), {tile, binary()} | {vector, [number()]}, pos_integer()) ->
+        {ok, [{binary(), float()}]} | {error, term()}.
+search(JobId, Query, K) -> gen_server:call(?MODULE, {search, JobId, Query, K}, infinity).
+
 init([]) -> {ok, #{}}.
 
 handle_call({submit, Req}, _From, Jobs) ->
@@ -33,7 +37,14 @@ handle_call({status, Id}, _From, Jobs) ->
         _          -> {reply, {error, not_found}, Jobs}
     end;
 handle_call(list, _From, Jobs) ->
-    {reply, [job_view(J, Jobs) || J <- maps:values(Jobs)], Jobs}.
+    {reply, [job_view(J, Jobs) || J <- maps:values(Jobs)], Jobs};
+handle_call({search, JobId, Query, K}, _From, Jobs) ->
+    case Jobs of
+        #{JobId := #job{coord = C}} when is_pid(C) ->
+            {reply, velora_coordinator:search(C, Query, K), Jobs};
+        _ ->
+            {reply, {error, not_found}, Jobs}
+    end.
 
 handle_cast({completed, Id, TilePaths, Stats}, Jobs) ->
     case Jobs of

@@ -6,7 +6,7 @@
 -module(velora_coordinator).
 -behaviour(gen_server).
 
--export([start_link/1, next_tile/1, ack/2, ack/3, job_ctx/1, progress/1, stop/1]).
+-export([start_link/1, next_tile/1, ack/2, ack/3, job_ctx/1, progress/1, search/3, stop/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(MAX_ATTEMPTS, 3).
@@ -20,6 +20,8 @@
     leases       :: #{pid() => {reference(), rast_tiling:tile(), non_neg_integer()}},
     done         :: #{tkey() => rast_tiling:tile()},
     stats        :: velora_stats:partial(),
+    vectors      :: [{binary(), [number()]}],
+    index        :: term() | undefined,
     max_attempts :: pos_integer(),
     on_done      :: fun(([rast_tiling:tile()], map()) -> any()),
     on_fail      :: fun((term()) -> any()),
@@ -46,6 +48,10 @@ job_ctx(Pid) -> gen_server:call(Pid, job_ctx, infinity).
 -spec progress(pid()) -> {non_neg_integer(), non_neg_integer()}.
 progress(Pid) -> gen_server:call(Pid, progress, infinity).
 
+-spec search(pid(), {tile, binary()} | {vector, [number()]}, pos_integer()) ->
+        {ok, [{binary(), float()}]} | {error, term()}.
+search(Pid, Query, K) -> gen_server:call(Pid, {search, Query, K}, infinity).
+
 -spec stop(pid()) -> ok.
 stop(Pid) -> gen_server:stop(Pid).
 
@@ -54,6 +60,7 @@ init({Tiles, Ctx, OnDone, OnFail}) ->
     velora_jobs:register(self()),
     {ok, #state{queue = [{T, 0} || T <- Tiles], ctx = Ctx, total = length(Tiles),
                 leases = #{}, done = #{}, stats = velora_stats:empty(Bins),
+                vectors = [], index = undefined,
                 max_attempts = ?MAX_ATTEMPTS, on_done = OnDone, on_fail = OnFail,
                 failed = false}}.
 
@@ -67,13 +74,22 @@ handle_call(next_tile, _From, #state{queue = [], done = D, total = Tot} = S)
     {reply, done, S};
 handle_call(next_tile, _From, #state{queue = []} = S) ->
     {reply, wait, S};
+handle_call({search, _Q, _K}, _From, #state{index = undefined} = S) ->
+    {reply, {error, not_ready}, S};
+handle_call({search, {tile, TileId}, K}, _From, #state{index = Ix, vectors = V} = S) ->
+    case lists:keyfind(TileId, 1, V) of
+        {TileId, Hist} -> {reply, {ok, velora_index:search(Ix, velora_index:vector(Hist), K)}, S};
+        false          -> {reply, {error, unknown_tile}, S}
+    end;
+handle_call({search, {vector, Vec}, K}, _From, #state{index = Ix} = S) ->
+    {reply, {ok, velora_index:search(Ix, Vec, K)}, S};
 handle_call(job_ctx, _From, S) ->
     {reply, {ok, S#state.ctx}, S};
 handle_call(progress, _From, #state{done = D, total = T} = S) ->
     {reply, {map_size(D), T}, S}.
 
 handle_cast({ack, WorkerPid, Tile, Partial},
-            #state{done = D, stats = St, total = Tot,
+            #state{done = D, stats = St, total = Tot, vectors = Vectors,
                    ctx = Ctx, on_done = OnDone} = S) ->
     Key = key(Tile),
     case maps:is_key(Key, D) of
@@ -83,12 +99,17 @@ handle_cast({ack, WorkerPid, Tile, Partial},
             S1  = clear_lease(WorkerPid, S),
             D2  = D#{Key => Tile},
             St2 = case Partial of undefined -> St; _ -> velora_stats:merge(St, Partial) end,
-            S2  = S1#state{done = D2, stats = St2},
+            V2  = case Partial of
+                      undefined -> Vectors;
+                      _         -> [{tile_id(Tile), maps:get(hist, Partial)} | Vectors]
+                  end,
+            S2  = S1#state{done = D2, stats = St2, vectors = V2},
             case map_size(D2) of
-                Tot -> velora_jobs:unregister(self()),
+                Tot -> Index = velora_index:build(maps:get(bins, Ctx, 1), lists:reverse(V2)),
+                       velora_jobs:unregister(self()),
                        _ = OnDone(done_tiles(D2),
                                   velora_stats:finalize(St2, maps:get(range, Ctx, undefined))),
-                       {noreply, S2};
+                       {noreply, S2#state{index = Index}};
                 _   -> {noreply, S2}
             end
     end.
@@ -118,6 +139,10 @@ handle_info(_I, S) ->
 terminate(_R, _S) -> ok.
 
 key(Tile) -> {maps:get(x, Tile), maps:get(y, Tile)}.
+
+tile_id(Tile) ->
+    {X, Y} = key(Tile),
+    list_to_binary(lists:flatten(io_lib:format("~w_~w", [X, Y]))).
 
 done_tiles(D) -> maps:values(D).
 

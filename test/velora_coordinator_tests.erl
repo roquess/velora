@@ -70,3 +70,21 @@ job_ctx_test() ->
     {ok, C} = start([], fun(_,_) -> ok end, fun(_) -> ok end),
     {ok, Ctx} = velora_coordinator:job_ctx(C),
     ?assertEqual(ndvi, maps:get(op, Ctx)).
+
+index_search_test() ->
+    Tiles = [#{x=>0,y=>0,w=>1,h=>1}, #{x=>1,y=>0,w=>1,h=>1}, #{x=>2,y=>0,w=>1,h=>1}],
+    Parent = self(),
+    {ok, C} = start(Tiles, fun(_A,_S) -> Parent ! done end, fun(_) -> ok end),
+    P = fun(Hist) -> #{count => lists:sum(Hist), min => 0.0, max => 1.0,
+                       sum => 0.0, sumsq => 0.0, hist => Hist} end,
+    {ok, T0} = velora_coordinator:next_tile(C),
+    velora_coordinator:ack(C, T0, P([10,0,0,0])),
+    {ok, T1} = velora_coordinator:next_tile(C),
+    velora_coordinator:ack(C, T1, P([20,0,0,0])),
+    {ok, T2} = velora_coordinator:next_tile(C),
+    velora_coordinator:ack(C, T2, P([0,0,0,10])),
+    receive done -> ok after 2000 -> ?assert(false) end,
+    {ok, R} = velora_coordinator:search(C, {tile, <<"0_0">>}, 3),
+    Ids = [Id || {Id, _} <- R],
+    ?assertEqual([<<"0_0">>, <<"1_0">>], lists:sublist(Ids, 2)),
+    ?assertEqual(<<"2_0">>, lists:last(Ids)).
