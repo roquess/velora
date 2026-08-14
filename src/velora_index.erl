@@ -1,7 +1,20 @@
 %%% @doc Per-tile k-NN index over kvex. Feature vectors are L2-normalized output
 %%% histograms; search is cosine similarity (dot product of unit vectors).
 -module(velora_index).
--export([vector/1, build/2, search/3]).
+-export([vector/1, build/2, search/3, search_vectors/4]).
+
+%% @doc Rebuild an index from persisted per-tile vectors and search it. Used when
+%% the owning coordinator is gone (crash / restart) but the vectors were saved.
+-spec search_vectors(pos_integer(), [{binary(), [number()]}],
+                     {tile, binary()} | {vector, [number()]}, pos_integer()) ->
+        {ok, [{binary(), float()}]} | {error, term()}.
+search_vectors(Bins, Vectors, {tile, TileId}, K) ->
+    case lists:keyfind(TileId, 1, Vectors) of
+        {TileId, Hist} -> {ok, search(build(Bins, Vectors), vector(Hist), K)};
+        false          -> {error, unknown_tile}
+    end;
+search_vectors(Bins, Vectors, {vector, Vec}, K) ->
+    {ok, search(build(Bins, Vectors), Vec, K)}.
 
 -spec vector([number()]) -> [float()].
 vector(Hist) ->

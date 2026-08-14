@@ -7,7 +7,7 @@
 -behaviour(gen_server).
 
 -export([start_link/1, next_tile/1, ack/2, ack/3, nack/2, abort/2,
-         job_ctx/1, progress/1, search/3, stop/1]).
+         job_ctx/1, progress/1, search/3, vectors/1, stop/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(MAX_ATTEMPTS, 3).
@@ -60,6 +60,11 @@ progress(Pid) -> gen_server:call(Pid, progress, infinity).
         {ok, [{binary(), float()}]} | {error, term()}.
 search(Pid, Query, K) -> gen_server:call(Pid, {search, Query, K}, infinity).
 
+%% @doc The per-tile feature vectors (in build order) and their bin count, so the
+%% job manager can persist them and rebuild the index if this coordinator dies.
+-spec vectors(pid()) -> {ok, pos_integer(), [{binary(), [number()]}]}.
+vectors(Pid) -> gen_server:call(Pid, vectors, infinity).
+
 -spec stop(pid()) -> ok.
 stop(Pid) -> gen_server:stop(Pid).
 
@@ -96,6 +101,8 @@ handle_call({search, {tile, TileId}, K}, _From, #state{index = Ix, vectors = V} 
     end;
 handle_call({search, {vector, Vec}, K}, _From, #state{index = Ix} = S) ->
     {reply, {ok, velora_index:search(Ix, Vec, K)}, S};
+handle_call(vectors, _From, #state{vectors = V, ctx = Ctx} = S) ->
+    {reply, {ok, maps:get(bins, Ctx, 1), lists:reverse(V)}, S};
 handle_call(job_ctx, _From, S) ->
     {reply, {ok, S#state.ctx}, S};
 handle_call(progress, _From, #state{done = D, total = T} = S) ->

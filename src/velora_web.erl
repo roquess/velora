@@ -147,7 +147,7 @@ sweep(TtlMs) ->
     Dir = velora_config:work_dir(),
     Now = erlang:system_time(millisecond),
     Files = lists:append([filelib:wildcard(filename:join(Dir, P))
-                          || P <- ["web_*", "upload_*", "t_*.png", "tc/*.png"]]),
+                          || P <- ["web_*", "upload_*", "t_*.png", "tc/*.png", "*.vec"]]),
     Stale = [F || F <- Files, is_stale(F, Now, TtlMs)],
     _ = [file:delete(F) || F <- Stale],
     length(Stale).

@@ -8,7 +8,8 @@
          evict_expired/3, test_job/3, result_path/1, test_job2/3, result_path_of/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
--record(job, {id, status = running, total = 0, coord, out_vsi, tile_paths = [], stats = null, error, finished_at}).
+-record(job, {id, status = running, total = 0, coord, out_vsi, tile_paths = [],
+              stats = null, error, finished_at, vec_file}).
 
 start_link() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
@@ -72,10 +73,10 @@ handle_call(list, _From, Jobs) ->
     {reply, [job_view(J, Jobs) || J <- maps:values(Jobs)], Jobs};
 handle_call({search, JobId, Query, K}, _From, Jobs) ->
     case Jobs of
-        #{JobId := #job{coord = C}} when is_pid(C) ->
-            case is_process_alive(C) of
+        #{JobId := #job{coord = C} = J} ->
+            case is_pid(C) andalso is_process_alive(C) of
                 true  -> {reply, velora_coordinator:search(C, Query, K), Jobs};
-                false -> {reply, {error, not_found}, Jobs}
+                false -> {reply, search_persisted(J, Query, K), Jobs}
             end;
         _ ->
             {reply, {error, not_found}, Jobs}
@@ -89,10 +90,11 @@ handle_call({result_path, JobId}, _From, Jobs) ->
 
 handle_cast({completed, Id, TilePaths, Stats}, Jobs) ->
     case Jobs of
-        #{Id := #job{status = running} = J} ->
+        #{Id := #job{status = running, coord = C} = J} ->
             J2 = case velora_storage:assemble(J#job.out_vsi, TilePaths) of
                      {ok, _}    -> J#job{status = done, tile_paths = TilePaths,
-                                         stats = Stats, finished_at = now_ms()};
+                                         stats = Stats, finished_at = now_ms(),
+                                         vec_file = persist_vectors(Id, C)};
                      {error, E} -> J#job{status = error, error = E, finished_at = now_ms()}
                  end,
             {noreply, put_job(J2, Jobs)};
@@ -233,6 +235,26 @@ result_path_of(#job{}) -> {error, not_done}.
 stop_coord(#job{coord = C}) when is_pid(C) ->
     case is_process_alive(C) of true -> catch velora_coordinator:stop(C); false -> ok end;
 stop_coord(_) -> ok.
+
+%% Fetch the coordinator's vectors and persist them so search survives its death.
+persist_vectors(Id, C) when is_pid(C) ->
+    try
+        {ok, Bins, Vecs} = velora_coordinator:vectors(C),
+        File = filename:join(velora_config:work_dir(), binary_to_list(Id) ++ ".vec"),
+        ok = file:write_file(File, term_to_binary({Bins, Vecs})),
+        File
+    catch _:_ -> undefined end;
+persist_vectors(_, _) -> undefined.
+
+%% Search from persisted vectors (coordinator gone): rebuild the index on demand.
+search_persisted(#job{vec_file = F}, Query, K) when is_list(F) ->
+    case file:read_file(F) of
+        {ok, Bin} ->
+            {Bins, Vecs} = binary_to_term(Bin),
+            velora_index:search_vectors(Bins, Vecs, Query, K);
+        _ -> {error, not_found}
+    end;
+search_persisted(_, _, _) -> {error, not_found}.
 
 now_ms() -> erlang:system_time(millisecond).
 

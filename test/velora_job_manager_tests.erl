@@ -115,6 +115,38 @@ do_persist() ->
     #{stats := Stats} = Status,
     ?assertEqual(12 * 12, maps:get(count, Stats)).
 
+%% Similarity search survives losing the coordinator: after an app restart the
+%% index is rebuilt from the persisted per-tile vectors.
+knn_persistence_test_() ->
+    {timeout, 90, fun() ->
+        case gdal_available() of
+            false -> ?debugMsg("GDAL not available, skipping"), ok;
+            true  -> do_knn_persist()
+        end
+    end}.
+
+do_knn_persist() ->
+    {ok, _} = application:ensure_all_started(velora),
+    Dir = velora_worker_tests:tmp_dir(),
+    Scene = velora_worker_tests:make_2band_u16(Dir, "knn", 16, 16),
+    Out = filename:join(Dir, "knn_"
+            ++ integer_to_list(erlang:unique_integer([positive])) ++ ".tif"),
+    Req = #{op => ndvi,
+            sources => [#{uri => list_to_binary(Scene), 'band' => 1},
+                        #{uri => list_to_binary(Scene), 'band' => 2}],
+            out_uri => list_to_binary("file://" ++ Out),
+            tile => {8, 8}},
+    {ok, JobId} = velora_job_manager:submit(Req),
+    ok = poll_done(JobId, 60),
+    %% live search (coordinator still alive)
+    ?assertMatch({ok, [_ | _]}, velora_job_manager:search(JobId, {tile, <<"0_0">>}, 4)),
+    %% restart the app -> coordinator gone -> search from persisted vectors
+    ok = application:stop(velora),
+    {ok, _} = application:ensure_all_started(velora),
+    R2 = velora_job_manager:search(JobId, {tile, <<"0_0">>}, 4),
+    _ = application:stop(velora),
+    ?assertMatch({ok, [_ | _]}, R2).
+
 poll_done(_JobId, 0) -> {error, timeout};
 poll_done(JobId, N) ->
     case velora_job_manager:status(JobId) of
