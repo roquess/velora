@@ -1,0 +1,9 @@
+{
+  "name": "velora-e2e",
+  "private": true,
+  "scripts": {
+    "fixture": "node fixtures/make-fixture.js",
+    "test": "playwright test"
+  },
+  "devDependencies": { "@playwright/test": "^1.47.0" }
+}
