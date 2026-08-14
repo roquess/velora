@@ -1,1 +1,30 @@
-<!doctype html><meta charset="utf-8"><title>velora</title><h1>velora viewer</h1>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>velora viewer</title>
+<link rel="stylesheet" href="/assets/vendor/leaflet.css">
+<link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+<header><strong>velora</strong> — NDVI viewer</header>
+<main>
+  <section id="panel">
+    <div class="row"><label>Local file</label><input type="file" id="file" accept=".tif,.tiff"></div>
+    <div class="row"><label>or URL</label><input type="text" id="url" placeholder="https://… or s3://… or file://…"></div>
+    <div class="row"><label>NIR band</label><input type="number" id="nir" value="1" min="1"></div>
+    <div class="row"><label>Red band</label><input type="number" id="red" value="2" min="1"></div>
+    <button id="run">Run NDVI</button>
+    <div id="status"></div>
+    <div id="stats"></div>
+  </section>
+  <section id="mapwrap"><div id="map"></div></section>
+</main>
+<script src="/assets/vendor/leaflet.js"></script>
+<script src="/assets/vendor/geotiff.js"></script>
+<script src="/assets/vendor/georaster.js"></script>
+<script src="/assets/vendor/georaster-layer.js"></script>
+<script src="/assets/app.js"></script>
+</body>
+</html>
