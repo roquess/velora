@@ -7,6 +7,15 @@ init(Req, health) ->
 init(Req, cluster) ->
     Nodes = [atom_to_binary(N, utf8) || N <- velora_cluster:members()],
     {ok, reply(Req, 200, #{nodes => Nodes}), cluster};
+init(Req, info) ->
+    Jobs = velora_job_manager:list(),
+    Count = fun(St) -> length([x || #{status := S} <- Jobs, S =:= St]) end,
+    Info = #{node => node(),
+             nodes => length(velora_cluster:members()),
+             workers_per_node => velora_config:workers_per_node(),
+             jobs => #{total => length(Jobs), running => Count(running),
+                       done => Count(done), error => Count(error)}},
+    {ok, reply(Req, 200, Info), info};
 init(Req0, jobs) ->
     case cowboy_req:method(Req0) of
         <<"POST">> ->

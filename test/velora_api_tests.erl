@@ -14,6 +14,17 @@ api_health_test() ->
             httpc:request(get, {url(Port, "/health"), []}, [], [])
     after application:stop(velora) end.
 
+api_info_test() ->
+    {ok, _} = application:ensure_all_started(velora),
+    try
+        Port = velora_config:http_port(),
+        {ok, {{_,200,_}, _, B}} = httpc:request(get, {url(Port, "/info"), []}, [], []),
+        M = jsx:decode(list_to_binary(B), [return_maps]),
+        ?assert(is_binary(maps:get(<<"node">>, M))),
+        ?assert(is_integer(maps:get(<<"workers_per_node">>, M))),
+        ?assert(is_integer(maps:get(<<"total">>, maps:get(<<"jobs">>, M))))
+    after application:stop(velora) end.
+
 api_submit_test_() ->
     {timeout, 120, fun() ->
         case gdal_available() of false -> ok; true -> do_api_submit() end

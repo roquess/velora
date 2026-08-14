@@ -11,6 +11,7 @@ child_spec() ->
             {"/assets/[...]",     cowboy_static, {priv_dir,  velora, "www/assets"}},
             {"/health",           velora_api_h, health},
             {"/cluster",          velora_api_h, cluster},
+            {"/info",             velora_api_h, info},
             {"/uploads",          velora_upload_h, []},
             {"/render",           velora_render_h, []},
             {"/tiles/:id/:z/:x/:y", velora_tiles_h, []},
