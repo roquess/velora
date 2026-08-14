@@ -5,9 +5,11 @@
 %%% overview level and window the tile covers, so the browser only ever fetches
 %%% the currently-visible tiles and never the whole image.
 -module(velora_web).
--export([prepare/1, tile/4, source_path/1]).
+-export([prepare/1, tile/4, source_path/1, sweep/1]).
 %% exported for unit tests
 -export([bbox_3857/3, fake_extent/2, jdecode/1, native_zoom/1]).
+
+-include_lib("kernel/include/file.hrl").
 
 -define(SHIFT, 20037508.342789244).   %% half the web-mercator world extent (m)
 
@@ -91,6 +93,25 @@ tile(Id, Z, X, Y) ->
 
 source_path(Id) when is_binary(Id) -> source_path(binary_to_list(Id));
 source_path(Id) -> filename:join(velora_config:work_dir(), "web_" ++ Id ++ ".tif").
+
+%% @doc Delete prepared COGs, uploads and straggler tiles in the work dir older
+%% than TtlMs (their mtime). Returns how many files were removed. Prevents the
+%% work dir from growing without bound on a long-running server.
+-spec sweep(pos_integer()) -> non_neg_integer().
+sweep(TtlMs) ->
+    Dir = velora_config:work_dir(),
+    Now = erlang:system_time(millisecond),
+    Files = lists:append([filelib:wildcard(filename:join(Dir, P))
+                          || P <- ["web_*", "upload_*", "t_*.png"]]),
+    Stale = [F || F <- Files, is_stale(F, Now, TtlMs)],
+    _ = [file:delete(F) || F <- Stale],
+    length(Stale).
+
+is_stale(F, Now, Ttl) ->
+    case file:read_file_info(F, [{time, posix}]) of
+        {ok, #file_info{mtime = M}} -> Now - (M * 1000) >= Ttl;
+        _ -> false
+    end.
 
 band_args(N) when N >= 3 -> ["-b", "1", "-b", "2", "-b", "3"];
 band_args(_)             -> [].

@@ -41,6 +41,24 @@ jdecode_test() ->
 jdecode_no_json_test() ->
     ?assertError(no_json, velora_web:jdecode(<<"no json here">>)).
 
+%% ---- work-dir sweep ----
+
+sweep_test() ->
+    Dir = velora_config:work_dir(),
+    Old = filename:join(Dir, "web_sweeptest_old.tif"),
+    New = filename:join(Dir, "web_sweeptest_new.tif"),
+    ok = file:write_file(Old, <<"x">>),
+    ok = file:write_file(New, <<"y">>),
+    %% backdate Old by 2h (local time, as file:change_time expects)
+    Old2h = calendar:gregorian_seconds_to_datetime(
+              calendar:datetime_to_gregorian_seconds(calendar:local_time()) - 7200),
+    ok = file:change_time(Old, Old2h),
+    N = velora_web:sweep(3600000),     %% 1h TTL
+    ?assert(N >= 1),
+    ?assertNot(filelib:is_regular(Old)),
+    ?assert(filelib:is_regular(New)),
+    file:delete(New).
+
 %% ---- GDAL-backed: ingest a small raster and cut a tile ----
 
 prepare_tile_test_() ->
