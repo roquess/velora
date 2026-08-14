@@ -1,0 +1,162 @@
+%%% @doc Server-side web display of arbitrary rasters. `prepare/1` ingests any
+%%% GDAL-readable source (any format/size, georeferenced or not) once into a local
+%%% 8-bit web-mercator COG with overviews — this is the heavy, Erlang-side step.
+%%% Each XYZ tile is then cut from that local COG on demand: GDAL reads only the
+%%% overview level and window the tile covers, so the browser only ever fetches
+%%% the currently-visible tiles and never the whole image.
+-module(velora_web).
+-export([prepare/1, tile/4, source_path/1]).
+
+-define(SHIFT, 20037508.342789244).   %% half the web-mercator world extent (m)
+
+%% @doc Ingest a source URI to a local web-mercator COG; returns an id, lat/lon
+%% bounds [[S,W],[N,E]], and the data's native web-mercator zoom (so the client
+%% can stop requesting fresh tiles past it and just crisp-scale the sharpest ones).
+-spec prepare(binary() | string()) ->
+        {ok, binary(), [[float()]], integer()} | {error, term()}.
+prepare(Uri) ->
+    Vsi = velora_storage:to_vsi(Uri),
+    case info(Vsi) of
+        {ok, M} ->
+            Id   = integer_to_list(erlang:unique_integer([positive])),
+            NB   = length(maps:get(<<"bands">>, M, [])),
+            Warp = filename:join(velora_config:work_dir(), "web_" ++ Id ++ "_3857.tif"),
+            Out  = source_path(Id),
+            %% non-georeferenced images get a valid near-equator extent first
+            {Src, Vrt} = case has_crs(M) of
+                             true  -> {Vsi, undefined};
+                             false -> V = geo_vrt(M, Vsi, Id), {V, V}
+                         end,
+            R = case velora_storage:cmd("gdalwarp",
+                         ["-q", "-t_srs", "EPSG:3857", "-r", "bilinear",
+                          "-of", "GTiff", Src, Warp]) of
+                    {ok, _} ->
+                        case velora_storage:cmd("gdal_translate",
+                                 ["-q", "-of", "COG", "-ot", "Byte", "-scale"]
+                                 ++ band_args(NB) ++ [Warp, Out]) of
+                            {ok, _}    -> bounds(Out);
+                            {error, E} -> {error, {translate, E}}
+                        end;
+                    {error, E} -> {error, {warp, E}}
+                end,
+            _ = file:delete(Warp),
+            _ = case Vrt of undefined -> ok; _ -> file:delete(Vrt) end,
+            case R of
+                {ok, B} -> {ok, list_to_binary(Id), B, native_zoom(Out)};
+                Err     -> Err
+            end;
+        _ -> {error, unreadable}
+    end.
+
+%% Web-mercator zoom at which one COG pixel maps to one screen pixel, from the
+%% prepared COG's pixel size (geoTransform[1], metres in EPSG:3857).
+native_zoom(Path) ->
+    case velora_storage:cmd("gdalinfo", ["-json", Path]) of
+        {ok, Json} ->
+            try
+                M = jdecode(Json),
+                [_, Pw | _] = maps:get(<<"geoTransform">>, M),
+                Z = math:log2((2 * ?SHIFT) / (256 * abs(Pw))),
+                max(0, min(24, round(Z)))
+            catch _:_ -> 19 end;
+        _ -> 19
+    end.
+
+%% @doc Cut one XYZ tile (z/x/y) from the prepared COG as a 256x256 PNG binary.
+-spec tile(binary(), integer(), integer(), integer()) ->
+        {ok, binary()} | {error, term()}.
+tile(Id, Z, X, Y) ->
+    Src = source_path(Id),
+    case filelib:is_regular(Src) of
+        false -> {error, not_found};
+        true  ->
+            {Ulx, Uly, Lrx, Lry} = bbox_3857(Z, X, Y),
+            Png = filename:join(velora_config:work_dir(),
+                    "t_" ++ integer_to_list(erlang:unique_integer([positive])) ++ ".png"),
+            R = velora_storage:cmd("gdal_translate",
+                    ["-q", "-of", "PNG", "-outsize", "256", "256",
+                     "-projwin_srs", "EPSG:3857",
+                     "-projwin", f(Ulx), f(Uly), f(Lrx), f(Lry),
+                     Src, Png]),
+            Res = case R of
+                      {ok, _}    -> file:read_file(Png);
+                      {error, E} -> {error, E}   %% e.g. tile fully outside data
+                  end,
+            _ = file:delete(Png),
+            _ = file:delete(Png ++ ".aux.xml"),
+            Res
+    end.
+
+source_path(Id) when is_binary(Id) -> source_path(binary_to_list(Id));
+source_path(Id) -> filename:join(velora_config:work_dir(), "web_" ++ Id ++ ".tif").
+
+band_args(N) when N >= 3 -> ["-b", "1", "-b", "2", "-b", "3"];
+band_args(_)             -> [].
+
+%% Non-georeferenced image -> lightweight VRT referencing it with a valid
+%% near-equator extent (aspect-preserving) so mercator distortion is tiny.
+geo_vrt(M, Vsi, Id) ->
+    [W, H] = maps:get(<<"size">>, M, [1, 1]),
+    {Ulx, Uly, Lrx, Lry} = fake_extent(W, H),
+    Vrt = filename:join(velora_config:work_dir(), "web_" ++ Id ++ "_geo.vrt"),
+    case velora_storage:cmd("gdal_translate",
+             ["-q", "-of", "VRT", "-a_srs", "EPSG:4326",
+              "-a_ullr", f(Ulx), f(Uly), f(Lrx), f(Lry), Vsi, Vrt]) of
+        {ok, _}    -> Vrt;
+        {error, _} -> Vsi
+    end.
+
+%% Centre a small box on the equator so web-mercator's latitude stretching stays
+%% negligible (otherwise a round object looks egg-shaped). {Ulx,Uly,Lrx,Lry}.
+fake_extent(W, H) when is_integer(W), is_integer(H), W > 0, H > 0 ->
+    Aspect = W / H,
+    LatHalf = 10.0,
+    LonHalf0 = LatHalf * Aspect,
+    {LatH, LonH} = case LonHalf0 > 170.0 of
+                       true  -> {170.0 / Aspect, 170.0};
+                       false -> {LatHalf, LonHalf0}
+                   end,
+    {-LonH, LatH, LonH, -LatH};
+fake_extent(_, _) -> {-10.0, 10.0, 10.0, -10.0}.
+
+has_crs(#{<<"coordinateSystem">> := #{<<"wkt">> := Wkt}}) when is_binary(Wkt), Wkt =/= <<>> -> true;
+has_crs(_) -> false.
+
+info(Vsi) ->
+    case velora_storage:cmd("gdalinfo", ["-json", Vsi]) of
+        {ok, Json} -> try {ok, jdecode(Json)} catch _:_ -> error end;
+        _ -> error
+    end.
+
+%% gdalinfo output can be prefixed by GDAL warnings (stderr merged into stdout),
+%% so decode from the first '{'.
+jdecode(Bin) ->
+    case binary:match(Bin, <<"{">>) of
+        {Pos, _} -> json:decode(binary:part(Bin, Pos, byte_size(Bin) - Pos));
+        nomatch  -> erlang:error(no_json)
+    end.
+
+%% XYZ tile (origin top-left) -> web-mercator bounding box {ulx,uly,lrx,lry}.
+bbox_3857(Z, X, Y) ->
+    N    = math:pow(2, Z),
+    Size = (2 * ?SHIFT) / N,
+    Ulx  = -?SHIFT + X * Size,
+    Uly  =  ?SHIFT - Y * Size,
+    {Ulx, Uly, Ulx + Size, Uly - Size}.
+
+%% lat/lon bounds for Leaflet fitBounds, from gdalinfo's wgs84Extent.
+bounds(Src) ->
+    case velora_storage:cmd("gdalinfo", ["-json", Src]) of
+        {ok, Json} ->
+            try
+                M = jdecode(Json),
+                #{<<"wgs84Extent">> := #{<<"coordinates">> := [Ring | _]}} = M,
+                Lons = [Lon || [Lon, _Lat] <- Ring],
+                Lats = [Lat || [_Lon, Lat] <- Ring],
+                {ok, [[lists:min(Lats), lists:min(Lons)],
+                      [lists:max(Lats), lists:max(Lons)]]}
+            catch _:_ -> {error, no_bounds} end;
+        {error, E} -> {error, {gdalinfo, E}}
+    end.
+
+f(X) -> lists:flatten(io_lib:format("~.6f", [X])).

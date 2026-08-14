@@ -3,7 +3,11 @@
 -module(velora_storage).
 
 -export([to_vsi/1, tile_ullr/2, scene_meta/1, write_tile/6, assemble/2,
-         ensure_gdal_env/0]).
+         ensure_gdal_env/0, cmd/2]).
+
+%% @doc Run a GDAL CLI tool by name with args; {ok, Output} | {error, Reason}.
+-spec cmd(string(), [string()]) -> {ok, binary()} | {error, term()}.
+cmd(Name, Args) -> run(exe(Name), Args).
 
 -define(TIMEOUT, 120000).
 
@@ -12,6 +16,8 @@ to_vsi(Uri) when is_binary(Uri) -> to_vsi(binary_to_list(Uri));
 to_vsi("s3://" ++ Rest)   -> "/vsis3/" ++ Rest;
 to_vsi("gs://" ++ Rest)   -> "/vsigs/" ++ Rest;
 to_vsi("work://" ++ Rest) -> filename:join(velora_config:work_dir(), Rest);
+to_vsi("http://" ++ _ = U)  -> "/vsicurl/" ++ U;
+to_vsi("https://" ++ _ = U) -> "/vsicurl/" ++ U;
 to_vsi("file://" ++ Rest) -> Rest;
 to_vsi(Path)              -> Path.
 

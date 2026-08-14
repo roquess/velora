@@ -8,23 +8,44 @@
 <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
-<header><strong>velora</strong> — NDVI viewer</header>
-<main>
+<div id="app">
+  <div id="map"></div>
+
+  <div id="empty">
+    <div class="empty-card">
+      <div class="empty-title">Drop a raster here</div>
+      <div class="empty-sub">or open a file, paste a URL, or pick a sample</div>
+    </div>
+  </div>
+
+  <div id="overlay" class="hidden">
+    <div class="spinner"></div>
+    <div id="ovtext">Processing…</div>
+  </div>
+
   <section id="panel">
-    <div class="row"><label>Local file</label><input type="file" id="file" accept=".tif,.tiff"></div>
-    <div class="row"><label>or URL</label><input type="text" id="url" placeholder="https://… or s3://… or file://…"></div>
-    <div class="row"><label>NIR band</label><input type="number" id="nir" value="1" min="1"></div>
-    <div class="row"><label>Red band</label><input type="number" id="red" value="2" min="1"></div>
-    <button id="run">Run NDVI</button>
-    <div id="status"></div>
-    <div id="stats"></div>
+    <div class="brand"><span class="dot"></span> velora</div>
+
+    <label class="filebtn" id="filebtn">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h6l2 3h8v11H4z"/></svg>
+      Open image
+      <input type="file" id="file" hidden>
+    </label>
+    <div id="fname" class="fname">no file selected</div>
+
+    <div class="sep"><span>or</span></div>
+
+    <input type="text" id="url" class="urlin" placeholder="https:// · s3:// · file:// URL">
+    <button id="render" class="render">Render</button>
+    <div id="status" class="status"></div>
+
+    <div class="samples">
+      <button class="chip" data-uri="/assets/samples/carina.jpg">🌌 Carina Nebula</button>
+    </div>
   </section>
-  <section id="mapwrap"><div id="map"></div></section>
-</main>
+</div>
 <script src="/assets/vendor/leaflet.js"></script>
-<script src="/assets/vendor/geotiff.js"></script>
-<script src="/assets/vendor/georaster.js"></script>
-<script src="/assets/vendor/georaster-layer.js"></script>
 <script src="/assets/app.js"></script>
 </body>
 </html>
