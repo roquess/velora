@@ -29,12 +29,38 @@ search(JobId, Query, K) -> gen_server:call(?MODULE, {search, JobId, Query, K}, i
 result_path(JobId) -> gen_server:call(?MODULE, {result_path, JobId}, infinity).
 
 init([]) ->
+    Jobs = open_store(),
     erlang:send_after(evict_interval(), self(), evict),
-    {ok, #{}}.
+    {ok, Jobs}.
+
+%% Job records are persisted to DETS so completed jobs survive a job-manager
+%% restart; a job that was still `running' at the crash can't be recovered
+%% (its coordinator's callbacks are orphaned), so it reloads as an error.
+open_store() ->
+    File = filename:join(velora_config:work_dir(), "jobs.dets"),
+    case dets:open_file(jobs_table, [{file, File}, {auto_save, 5000}]) of
+        {ok, jobs_table} -> ok;
+        {error, _}       -> _ = file:delete(File),
+                            {ok, jobs_table} = dets:open_file(jobs_table, [{file, File}])
+    end,
+    dets:foldl(fun({Id, J}, Acc) ->
+                       try Acc#{Id => reload_job(J)} catch _:_ -> Acc end;
+                  (_Other, Acc) -> Acc
+               end, #{}, jobs_table).
+
+reload_job(#job{status = running} = J) ->
+    J#job{status = error, error = manager_restarted, coord = undefined,
+          finished_at = now_ms()};
+reload_job(J) -> J#job{coord = undefined}.
+
+%% write to DETS (coord pid stripped) and keep the full record in the state map
+put_job(#job{id = Id} = J, Jobs) ->
+    _ = catch dets:insert(jobs_table, {Id, J#job{coord = undefined}}),
+    Jobs#{Id => J}.
 
 handle_call({submit, Req}, _From, Jobs) ->
     case start_job(Req) of
-        {ok, Job}      -> {reply, {ok, Job#job.id}, Jobs#{Job#job.id => Job}};
+        {ok, Job}      -> {reply, {ok, Job#job.id}, put_job(Job, Jobs)};
         {error, _} = E -> {reply, E, Jobs}
     end;
 handle_call({status, Id}, _From, Jobs) ->
@@ -64,36 +90,39 @@ handle_call({result_path, JobId}, _From, Jobs) ->
 handle_cast({completed, Id, TilePaths, Stats}, Jobs) ->
     case Jobs of
         #{Id := #job{status = running} = J} ->
-            case velora_storage:assemble(J#job.out_vsi, TilePaths) of
-                {ok, _}    -> {noreply, Jobs#{Id => J#job{status = done, tile_paths = TilePaths,
-                                                          stats = Stats, finished_at = now_ms()}}};
-                {error, E} -> {noreply, Jobs#{Id => J#job{status = error, error = E,
-                                                          finished_at = now_ms()}}}
-            end;
+            J2 = case velora_storage:assemble(J#job.out_vsi, TilePaths) of
+                     {ok, _}    -> J#job{status = done, tile_paths = TilePaths,
+                                         stats = Stats, finished_at = now_ms()};
+                     {error, E} -> J#job{status = error, error = E, finished_at = now_ms()}
+                 end,
+            {noreply, put_job(J2, Jobs)};
         _ -> {noreply, Jobs}
     end;
 handle_cast({failed, Id, Reason}, Jobs) ->
     case Jobs of
-        #{Id := J} -> {noreply, Jobs#{Id => J#job{status = error, error = Reason,
-                                                  finished_at = now_ms()}}};
+        #{Id := J} -> {noreply, put_job(J#job{status = error, error = Reason,
+                                              finished_at = now_ms()}, Jobs)};
         _ -> {noreply, Jobs}
     end.
 
 handle_info(evict, Jobs) ->
     {Kept, Dropped} = evict_expired(Jobs, now_ms(), job_ttl()),
     _ = [stop_coord(maps:get(Id, Jobs)) || Id <- Dropped],
+    _ = [catch dets:delete(jobs_table, Id) || Id <- Dropped],
     erlang:send_after(evict_interval(), self(), evict),
     {noreply, Kept};
 handle_info({'DOWN', _Ref, process, Pid, Reason}, Jobs) ->
     %% a coordinator died unexpectedly -> fail just its (still-running) job
     {noreply, maps:map(
         fun(_Id, #job{coord = C, status = running} = J) when C =:= Pid ->
-                J#job{status = error, error = {coordinator_down, Reason},
-                      finished_at = now_ms()};
+                J2 = J#job{status = error, error = {coordinator_down, Reason},
+                           finished_at = now_ms()},
+                _ = catch dets:insert(jobs_table, {J2#job.id, J2#job{coord = undefined}}),
+                J2;
            (_Id, J) -> J
         end, Jobs)};
 handle_info(_I, S) -> {noreply, S}.
-terminate(_R, _S) -> ok.
+terminate(_R, _S) -> _ = catch dets:close(jobs_table), ok.
 
 start_job(#{op := Op, sources := Sources, out_uri := OutUri} = Req) ->
     {TW, TH} = maps:get(tile, Req, velora_config:tile()),

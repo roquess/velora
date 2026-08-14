@@ -84,6 +84,37 @@ grab_coord(N) ->
         _       -> timer:sleep(20), grab_coord(N - 1)
     end.
 
+%% A completed job survives a job-manager (application) restart: it is reloaded
+%% from the on-disk store with its status/stats intact.
+persistence_test_() ->
+    {timeout, 90, fun() ->
+        case gdal_available() of
+            false -> ?debugMsg("GDAL not available, skipping"), ok;
+            true  -> do_persist()
+        end
+    end}.
+
+do_persist() ->
+    {ok, _} = application:ensure_all_started(velora),
+    Dir = velora_worker_tests:tmp_dir(),
+    Scene = velora_worker_tests:make_2band_u16(Dir, "persist", 12, 12),
+    Out = filename:join(Dir, "persist_"
+            ++ integer_to_list(erlang:unique_integer([positive])) ++ ".tif"),
+    Req = #{op => ndvi,
+            sources => [#{uri => list_to_binary(Scene), 'band' => 1},
+                        #{uri => list_to_binary(Scene), 'band' => 2}],
+            out_uri => list_to_binary("file://" ++ Out),
+            tile => {4, 4}},
+    {ok, JobId} = velora_job_manager:submit(Req),
+    ok = poll_done(JobId, 60),
+    ok = application:stop(velora),                 %% flush + close the store
+    {ok, _} = application:ensure_all_started(velora),
+    Status = velora_job_manager:status(JobId),     %% reloaded from disk
+    _ = application:stop(velora),
+    ?assertMatch(#{status := done}, Status),
+    #{stats := Stats} = Status,
+    ?assertEqual(12 * 12, maps:get(count, Stats)).
+
 poll_done(_JobId, 0) -> {error, timeout};
 poll_done(JobId, N) ->
     case velora_job_manager:status(JobId) of
