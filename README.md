@@ -132,8 +132,11 @@ rebar3 ct           # end-to-end: single-node NDVI, multi-node exactly-once,
   `op: {"decode", scale}` also available). Adding index kernels is a rast concern.
 - **Reduction**: per-scene count/min/max/mean/stddev + histogram, mergeable per
   tile, on `GET /jobs/:id`.
-- **Fault tolerance**: worker/node death mid-job → tile reassignment; idempotent
-  writes + ack dedup → exactly-once; poison-tile cap fails a job cleanly.
+- **Fault tolerance**: worker/node death, a caught processing error, or a stuck
+  lease → tile reassignment; a source-open failure aborts the job instead of
+  hanging; idempotent writes + ack dedup → exactly-once; poison-tile cap fails a
+  job cleanly. Finished jobs are evicted after a TTL, so the cluster's memory is
+  bounded over long runs.
 - **Elasticity**: fixed per-node worker pool self-discovering jobs via `pg`;
   periodic membership discovery (static / DNS); a node joining mid-job contributes
   immediately.
