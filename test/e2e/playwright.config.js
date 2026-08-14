@@ -1,12 +1,24 @@
 const { defineConfig } = require("@playwright/test");
+const path = require("path");
+
+const repo = path.resolve(__dirname, "..", "..");
+const ebins = "_build/default/lib/*/ebin";
+const evalExpr = "application:ensure_all_started(velora), receive stop -> ok end";
+// Start velora if it isn't already running (reuseExistingServer attaches when it is).
+const startCmd =
+  process.platform === "win32"
+    ? `set "GDAL_BIN_DIR=C:/Program Files/GDAL" && erl -noshell -pa ${ebins} -eval "${evalExpr}"`
+    : `erl -noshell -pa ${ebins} -eval '${evalExpr}'`;
+
 module.exports = defineConfig({
   testDir: ".",
-  timeout: 120000,
+  timeout: 180000,
   use: { baseURL: "http://127.0.0.1:8080", headless: true },
   webServer: {
-    command: "echo velora-already-running",
+    command: startCmd,
+    cwd: repo,
     url: "http://127.0.0.1:8080/health",
     reuseExistingServer: true,
-    timeout: 60000
+    timeout: 120000
   }
 });

@@ -6,6 +6,8 @@
 %%% the currently-visible tiles and never the whole image.
 -module(velora_web).
 -export([prepare/1, tile/4, source_path/1]).
+%% exported for unit tests
+-export([bbox_3857/3, fake_extent/2, jdecode/1, native_zoom/1]).
 
 -define(SHIFT, 20037508.342789244).   %% half the web-mercator world extent (m)
 

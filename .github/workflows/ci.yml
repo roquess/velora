@@ -75,5 +75,37 @@ jobs:
       - name: S3 integration (CT)
         run: rebar3 ct --suite test/velora_s3_SUITE
 
-# CI: build, unit + common tests (GDAL installed on the runner); a separate
-# s3-integration job exercises the /vsis3 data plane against a MinIO service.
+  viewer-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '27'
+          rebar3-version: '3'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install GDAL
+        run: sudo apt-get update && sudo apt-get install -y gdal-bin
+
+      - name: Compile
+        run: rebar3 compile
+
+      - name: Install E2E deps
+        working-directory: test/e2e
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: Viewer E2E (Playwright)
+        working-directory: test/e2e
+        run: npx playwright test
+
+# CI: build, unit + common tests (GDAL installed on the runner); an
+# s3-integration job exercises the /vsis3 data plane against a MinIO service;
+# a viewer-e2e job drives the tile viewer end-to-end with Playwright (Playwright
+# starts velora itself via its webServer config and renders the default sample).
