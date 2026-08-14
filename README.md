@@ -12,6 +12,12 @@ exactly-once.
 [![CI](https://github.com/roquess/velora/actions/workflows/ci.yml/badge.svg)](https://github.com/roquess/velora/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
+It also ships a **browser viewer** on the same HTTP port: drop in (or paste a URL
+to) any GDAL-readable raster — GeoTIFF/COG, JP2, PNG/JPEG, FITS, georeferenced or
+not — and velora warps it to a web-mercator COG server-side and streams it as
+on-demand map tiles. Gigapixel images open by fetching only the tiles currently in
+view; the browser never loads the whole raster.
+
 ## Why it's built this way
 
 A single Sentinel-2 band is ~120 million pixels; a scene is far larger. Two ideas
@@ -79,16 +85,42 @@ curl -XPOST localhost:8080/jobs/<job_id>/search \
 # -> {"results": [{"tile_id":"3_5","score":1.0}, {"tile_id":"4_5","score":0.98}, ...]}
 ```
 
+## Web viewer
+
+Open `http://localhost:8080/` in a browser. Choose a raster (a local file, a
+drag-and-drop, or a URL) and hit **Render**: velora ingests it once into a local
+web-mercator COG with overviews (`POST /render`) and then serves 256×256 PNG map
+tiles on demand (`GET /tiles/:id/:z/:x/:y`), cutting only the window each visible
+tile needs from the COG's overviews. The client is a plain Leaflet map that just
+draws the tiles — no raster parsing in the browser — so even a gigapixel image
+opens quickly. Non-georeferenced images (a JPEG, a telescope photo) are given a
+valid near-equator extent so they display undistorted.
+
+```bash
+curl -XPOST localhost:8080/render -H 'content-type: application/json' \
+  -d '{"uri":"https://…/scene.tif"}'
+# -> {"id":"1234","bounds":[[S,W],[N,E]],"maxNativeZoom":13}
+# then the browser fetches /tiles/1234/{z}/{x}/{y}
+```
+
+`uri` may be `file://…`, `s3://…` (→ `/vsis3`), `gs://…`, or `http(s)://…`
+(→ `/vsicurl`). Uploads (`POST /uploads`, multipart) return a `work://` URI.
+
 ## HTTP API
 
-| Method & path            | Purpose                                             |
-|--------------------------|-----------------------------------------------------|
-| `POST /jobs`             | Submit a job → `202 {"job_id": …}`                  |
-| `GET  /jobs/:id`         | Job status, progress, result URI, and `stats`       |
-| `GET  /jobs`             | List jobs                                           |
-| `POST /jobs/:id/search`  | k-NN similar tiles (`{"tile":"x_y"}` or `{"vector":[…]}`, `"k"`) |
-| `GET  /cluster`          | Connected nodes                                     |
-| `GET  /health`           | Liveness                                            |
+| Method & path              | Purpose                                             |
+|----------------------------|-----------------------------------------------------|
+| `GET  /`, `GET /assets/…`  | The browser viewer (static SPA)                     |
+| `POST /uploads`            | Upload a raster (multipart) → `{"uri":"work://…"}`   |
+| `POST /render`             | Ingest a source for tiling → `{id, bounds, maxNativeZoom}` |
+| `GET  /tiles/:id/:z/:x/:y` | On-demand PNG map tile of a rendered source          |
+| `POST /jobs`               | Submit a processing job → `202 {"job_id": …}`       |
+| `GET  /jobs/:id`           | Job status, progress, result URI, and `stats`       |
+| `GET  /jobs/:id/result`    | Stream a done job's local COG (HTTP Range)          |
+| `GET  /jobs`               | List jobs                                           |
+| `POST /jobs/:id/search`    | k-NN similar tiles (`{"tile":"x_y"}` or `{"vector":[…]}`, `"k"`) |
+| `GET  /cluster`            | Connected nodes                                     |
+| `GET  /health`             | Liveness                                            |
 
 ## Running a cluster
 
@@ -128,6 +160,10 @@ rebar3 ct           # end-to-end: single-node NDVI, multi-node exactly-once,
 
 ## Capabilities
 
+- **Web viewer**: display any GDAL raster as on-demand web-mercator PNG tiles
+  (`POST /render` + `GET /tiles/…`); only the visible tiles are cut, so large
+  images stay responsive. A background janitor sweeps prepared COGs/uploads after
+  a TTL so the work dir stays bounded.
 - **NDVI** over tiled COG scenes → a georeferenced GeoTIFF (`op: "ndvi"`;
   `op: {"decode", scale}` also available). Adding index kernels is a rast concern.
 - **Reduction**: per-scene count/min/max/mean/stddev + histogram, mergeable per
@@ -135,16 +171,18 @@ rebar3 ct           # end-to-end: single-node NDVI, multi-node exactly-once,
 - **Fault tolerance**: worker/node death, a caught processing error, or a stuck
   lease → tile reassignment; a source-open failure aborts the job instead of
   hanging; idempotent writes + ack dedup → exactly-once; poison-tile cap fails a
-  job cleanly. Finished jobs are evicted after a TTL, so the cluster's memory is
-  bounded over long runs.
+  job cleanly. Coordinators run under a dedicated dynamic supervisor and the job
+  manager only *monitors* them, so a coordinator crash fails just its own job
+  rather than taking the manager (and every other job) down. Finished jobs are
+  evicted after a TTL, so the cluster's memory is bounded over long runs.
 - **Elasticity**: fixed per-node worker pool self-discovering jobs via `pg`;
   periodic membership discovery (static / DNS); a node joining mid-job contributes
   immediately.
 - **Similarity search**: per-tile k-NN index (L2-normalized histograms via kvex),
   `POST /jobs/:id/search`.
 
-Not yet: persistence of job state across a coordinator crash; learned (ONNX)
-embeddings as the search feature; zonal statistics.
+Not yet: persistence of job state across a job-manager restart (jobs are held in
+memory); learned (ONNX) embeddings as the search feature; zonal statistics.
 
 ## License
 
