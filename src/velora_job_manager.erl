@@ -84,6 +84,14 @@ handle_info(evict, Jobs) ->
     _ = [stop_coord(maps:get(Id, Jobs)) || Id <- Dropped],
     erlang:send_after(evict_interval(), self(), evict),
     {noreply, Kept};
+handle_info({'DOWN', _Ref, process, Pid, Reason}, Jobs) ->
+    %% a coordinator died unexpectedly -> fail just its (still-running) job
+    {noreply, maps:map(
+        fun(_Id, #job{coord = C, status = running} = J) when C =:= Pid ->
+                J#job{status = error, error = {coordinator_down, Reason},
+                      finished_at = now_ms()};
+           (_Id, J) -> J
+        end, Jobs)};
 handle_info(_I, S) -> {noreply, S}.
 terminate(_R, _S) -> ok.
 
@@ -115,9 +123,12 @@ start_job(#{op := Op, sources := Sources, out_uri := OutUri} = Req) ->
                         gen_server:cast(Mgr, {completed, Id, Paths, Stats})
                     end,
                     OnFail = fun(Reason) -> gen_server:cast(Mgr, {failed, Id, Reason}) end,
-                    {ok, C} = velora_coordinator:start_link(
+                    {ok, C} = velora_coordinator_sup:start_coordinator(
                                 #{tiles => Tiles, ctx => Ctx,
                                   on_done => OnDone, on_fail => OnFail}),
+                    %% monitor (not link) so a coordinator crash fails just this
+                    %% job instead of taking the whole job manager down
+                    _ = erlang:monitor(process, C),
                     {ok, #job{id = Id, total = length(Tiles), coord = C, out_vsi = OutVsi}};
                 {error, E} -> {error, E}
             end;
