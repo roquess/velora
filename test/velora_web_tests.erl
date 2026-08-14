@@ -63,6 +63,28 @@ allowed_restricted_test() ->
         ?assert(velora_web:allowed(<<"s3://b/k.tif">>))
     after application:unset_env(velora, allowed_schemes) end.
 
+%% ---- emergence agent query ----
+
+agent_query_test_() ->
+    {timeout, 60, fun() ->
+        case gdal_available() of
+            false -> ?debugMsg("GDAL not available, skipping"), ok;
+            true  -> do_agent_query()
+        end
+    end}.
+
+do_agent_query() ->
+    velora_storage:ensure_gdal_env(),
+    Dir = velora_worker_tests:tmp_dir(),
+    Scene = velora_worker_tests:make_2band_u16(Dir, "agentscene", 16, 16),
+    Body = jsx:encode(#{uri => list_to_binary(Scene)}),
+    [R] = velora_agent_h:handle_query(Body),
+    ?assertEqual(<<"raster">>, maps:get(type, R)),
+    ?assert(is_binary(maps:get(id, R))),
+    ?assertMatch([[_, _], [_, _]], maps:get(bounds, R)),
+    %% a query without a source URI answers with no results
+    ?assertEqual([], velora_agent_h:handle_query(jsx:encode(#{query => <<"hello world">>}))).
+
 %% ---- work-dir sweep ----
 
 sweep_test() ->

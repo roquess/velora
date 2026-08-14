@@ -20,6 +20,7 @@ init([]) ->
           start => {velora_job_manager, start_link, []}},
         velora_api:child_spec(),
         #{id => velora_discovery, start => {velora_discovery, start_link, []}},
-        #{id => velora_janitor, start => {velora_janitor, start_link, []}}
+        #{id => velora_janitor, start => {velora_janitor, start_link, []}},
+        #{id => velora_emergence, start => {velora_emergence, start_link, []}}
     ],
     {ok, {SupFlags, Children}}.
