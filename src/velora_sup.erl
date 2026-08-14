@@ -13,6 +13,8 @@ init([]) ->
         #{id => velora_coordinator_sup,
           start => {velora_coordinator_sup, start_link, []},
           type => supervisor},
+        #{id => velora_render_registry,
+          start => {velora_render_registry, start_link, []}},
         #{id => velora_worker_pool,
           start => {velora_worker_pool, start_link, []},
           type => supervisor},

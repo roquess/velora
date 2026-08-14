@@ -10,7 +10,7 @@ init(Req0, State) ->
             {ok, Body, Req1} = cowboy_req:read_body(Req0),
             case uri(Body) of
                 {ok, Uri} ->
-                    case velora_web:prepare(Uri) of
+                    case velora_render:prepare(Uri) of
                         {ok, Id, Bounds, MaxNativeZoom} ->
                             {ok, json(Req1, 200, #{id => Id, bounds => Bounds,
                                                    maxNativeZoom => MaxNativeZoom}), State};

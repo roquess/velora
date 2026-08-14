@@ -4,7 +4,7 @@
 -module(velora_discovery).
 -behaviour(gen_server).
 
--export([start_link/0, targets/1, reconcile/1]).
+-export([start_link/0, targets/1, reconcile/1, empop_targets/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 start_link() ->
@@ -44,8 +44,23 @@ targets({dns, Host, Base}) ->
         _ ->
             []
     end;
+targets({empop}) ->
+    targets({empop, "velora"});
+targets({empop, Base}) ->
+    %% sibling velora nodes discovered through the Emergence gossip mesh; a peer
+    %% advertising host H is expected to run the Erlang node Base@H.
+    empop_targets(Base, velora_emergence:peers());
 targets(_) ->
     [].
+
+%% @doc Map em_pop peer maps to Base@host Erlang node names (pure, testable).
+-spec empop_targets(string(), [map()]) -> [node()].
+empop_targets(Base, Peers) ->
+    lists:usort([list_to_atom(Base ++ "@" ++ host_str(H))
+                 || #{host := H} <- Peers, H =/= undefined]).
+
+host_str(H) when is_binary(H) -> binary_to_list(H);
+host_str(H) when is_list(H)   -> H.
 
 strategy() ->
     case application:get_env(velora, discovery) of

@@ -9,7 +9,7 @@ init(Req, State) ->
         Z = binary_to_integer(cowboy_req:binding(z, Req)),
         X = binary_to_integer(cowboy_req:binding(x, Req)),
         Y = binary_to_integer(cowboy_req:binding(y, Req)),
-        case velora_web:tile(Id, Z, X, Y) of
+        case velora_render:tile(Id, Z, X, Y) of
             {ok, Png} ->
                 {ok, cowboy_req:reply(200,
                     #{<<"content-type">> => <<"image/png">>,
