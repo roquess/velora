@@ -57,3 +57,11 @@ evict_expired_test() ->
     {Kept, Dropped} = velora_job_manager:evict_expired(Jobs, Now, 1000),
     ?assertEqual([<<"b">>], lists:sort(Dropped)),
     ?assertEqual([<<"a">>, <<"c">>], lists:sort(maps:keys(Kept))).
+
+result_path_test() ->
+    Done   = velora_job_manager:test_job2(<<"d">>, done, "C:/no/such/out.tif"),
+    Run    = velora_job_manager:test_job2(<<"r">>, running, "C:/x.tif"),
+    Remote = velora_job_manager:test_job2(<<"m">>, done, "/vsis3/b/o.tif"),
+    ?assertEqual({error, missing}, velora_job_manager:result_path_of(Done)),   %% path not on disk
+    ?assertEqual({error, not_done}, velora_job_manager:result_path_of(Run)),
+    ?assertEqual({error, remote},  velora_job_manager:result_path_of(Remote)).

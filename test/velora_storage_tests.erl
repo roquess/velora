@@ -42,3 +42,8 @@ do_roundtrip() ->
     ?assertEqual(4, maps:get(height, M)),
     ?assertEqual(<<"Float32">>, maps:get(dtype, M)),
     file:delete(Path).
+
+work_uri_test() ->
+    Dir = velora_config:work_dir(),
+    ?assertEqual(filename:join(Dir, "a.tif"),
+                 velora_storage:to_vsi(<<"work://a.tif">>)).

@@ -5,7 +5,7 @@
 -behaviour(gen_server).
 
 -export([start_link/0, submit/1, status/1, list/0, search/3,
-         evict_expired/3, test_job/3]).
+         evict_expired/3, test_job/3, result_path/1, test_job2/3, result_path_of/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -record(job, {id, status = running, total = 0, coord, out_vsi, tile_paths = [], stats = null, error, finished_at}).
@@ -24,6 +24,9 @@ list() -> gen_server:call(?MODULE, list, infinity).
 -spec search(binary(), {tile, binary()} | {vector, [number()]}, pos_integer()) ->
         {ok, [{binary(), float()}]} | {error, term()}.
 search(JobId, Query, K) -> gen_server:call(?MODULE, {search, JobId, Query, K}, infinity).
+
+-spec result_path(binary()) -> {ok, string()} | {error, term()}.
+result_path(JobId) -> gen_server:call(?MODULE, {result_path, JobId}, infinity).
 
 init([]) ->
     erlang:send_after(evict_interval(), self(), evict),
@@ -50,7 +53,13 @@ handle_call({search, JobId, Query, K}, _From, Jobs) ->
             end;
         _ ->
             {reply, {error, not_found}, Jobs}
-    end.
+    end;
+handle_call({result_path, JobId}, _From, Jobs) ->
+    R = case Jobs of
+            #{JobId := J} -> result_path_of(J);
+            _ -> {error, not_found}
+        end,
+    {reply, R, Jobs}.
 
 handle_cast({completed, Id, TilePaths, Stats}, Jobs) ->
     case Jobs of
@@ -165,6 +174,21 @@ evict_expired(Jobs, Now, TtlMs) ->
 
 test_job(Id, Status, FinishedAt) ->
     #job{id = Id, status = Status, finished_at = FinishedAt}.
+
+test_job2(Id, Status, OutVsi) -> #job{id = Id, status = Status, out_vsi = OutVsi}.
+
+%% pure resolver used by the {result_path, ...} call and by tests
+-spec result_path_of(#job{}) -> {ok, string()} | {error, term()}.
+result_path_of(#job{status = done, out_vsi = P}) when is_list(P) ->
+    case is_vsi(P) of
+        true  -> {error, remote};
+        false -> case filelib:is_regular(P) of
+                     true  -> {ok, P};
+                     false -> {error, missing}
+                 end
+    end;
+result_path_of(#job{status = done}) -> {error, missing};
+result_path_of(#job{}) -> {error, not_done}.
 
 stop_coord(#job{coord = C}) when is_pid(C) ->
     case is_process_alive(C) of true -> catch velora_coordinator:stop(C); false -> ok end;

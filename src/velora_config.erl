@@ -1,6 +1,6 @@
 %%% @doc Typed accessors over the `velora' application environment.
 -module(velora_config).
--export([http_port/0, peers/0, tile/0, workers_per_node/0]).
+-export([http_port/0, peers/0, tile/0, workers_per_node/0, work_dir/0]).
 
 -spec http_port() -> inet:port_number().
 http_port() -> get(http_port, 8080).
@@ -17,6 +17,21 @@ workers_per_node() ->
     case get(workers_per_node, undefined) of
         undefined -> max(1, erlang:system_info(dirty_cpu_schedulers));
         N when is_integer(N), N >= 1 -> N
+    end.
+
+-spec work_dir() -> string().
+work_dir() ->
+    Dir = case get(work_dir, undefined) of
+              undefined -> filename:join(tmp_root(), "velora_work");
+              D -> D
+          end,
+    _ = filelib:ensure_dir(filename:join(Dir, "x")),
+    Dir.
+
+tmp_root() ->
+    case os:getenv("TMP") of
+        false -> case os:getenv("TMPDIR") of false -> "/tmp"; T -> T end;
+        T -> T
     end.
 
 get(Key, Default) ->

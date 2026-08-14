@@ -11,6 +11,7 @@
 to_vsi(Uri) when is_binary(Uri) -> to_vsi(binary_to_list(Uri));
 to_vsi("s3://" ++ Rest)   -> "/vsis3/" ++ Rest;
 to_vsi("gs://" ++ Rest)   -> "/vsigs/" ++ Rest;
+to_vsi("work://" ++ Rest) -> filename:join(velora_config:work_dir(), Rest);
 to_vsi("file://" ++ Rest) -> Rest;
 to_vsi(Path)              -> Path.
 
