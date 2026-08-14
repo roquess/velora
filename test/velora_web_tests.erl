@@ -41,6 +41,28 @@ jdecode_test() ->
 jdecode_no_json_test() ->
     ?assertError(no_json, velora_web:jdecode(<<"no json here">>)).
 
+%% ---- source-scheme restriction ----
+
+scheme_test() ->
+    ?assertEqual(<<"https">>, velora_web:scheme(<<"https://h/x.tif">>)),
+    ?assertEqual(<<"s3">>,    velora_web:scheme(<<"s3://b/k.tif">>)),
+    ?assertEqual(<<"file">>,  velora_web:scheme(<<"file:///a.tif">>)),
+    ?assertEqual(<<"file">>,  velora_web:scheme(<<"/local/a.tif">>)).
+
+allowed_default_test() ->
+    application:unset_env(velora, allowed_schemes),
+    ?assert(velora_web:allowed(<<"file:///x.tif">>)),
+    ?assert(velora_web:allowed(<<"http://h/x.tif">>)).
+
+allowed_restricted_test() ->
+    application:set_env(velora, allowed_schemes, [https, s3]),
+    try
+        ?assertNot(velora_web:allowed(<<"file:///x.tif">>)),
+        ?assertNot(velora_web:allowed(<<"http://h/x.tif">>)),
+        ?assert(velora_web:allowed(<<"https://h/x.tif">>)),
+        ?assert(velora_web:allowed(<<"s3://b/k.tif">>))
+    after application:unset_env(velora, allowed_schemes) end.
+
 %% ---- work-dir sweep ----
 
 sweep_test() ->

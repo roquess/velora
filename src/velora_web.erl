@@ -7,7 +7,7 @@
 -module(velora_web).
 -export([prepare/1, tile/4, source_path/1, sweep/1]).
 %% exported for unit tests
--export([bbox_3857/3, fake_extent/2, jdecode/1, native_zoom/1]).
+-export([bbox_3857/3, fake_extent/2, jdecode/1, native_zoom/1, scheme/1, allowed/1]).
 
 -include_lib("kernel/include/file.hrl").
 
@@ -19,6 +19,12 @@
 -spec prepare(binary() | string()) ->
         {ok, binary(), [[float()]], integer()} | {error, term()}.
 prepare(Uri) ->
+    case allowed(Uri) of
+        false -> {error, {scheme_not_allowed, scheme(Uri)}};
+        true  -> prepare_1(Uri)
+    end.
+
+prepare_1(Uri) ->
     Vsi = velora_storage:to_vsi(Uri),
     case info(Vsi) of
         {ok, M} ->
@@ -93,6 +99,30 @@ tile(Id, Z, X, Y) ->
 
 source_path(Id) when is_binary(Id) -> source_path(binary_to_list(Id));
 source_path(Id) -> filename:join(velora_config:work_dir(), "web_" ++ Id ++ ".tif").
+
+%% @doc The URI's scheme as a lowercase binary; a bare path is `<<"file">>'.
+-spec scheme(binary() | string()) -> binary().
+scheme(Uri0) ->
+    Uri = if is_binary(Uri0) -> binary_to_list(Uri0); true -> Uri0 end,
+    case string:split(Uri, "://") of
+        [S, _] when S =/= Uri -> list_to_binary(string:lowercase(S));
+        _                     -> <<"file">>
+    end.
+
+%% @doc Whether a source URI's scheme is permitted. Permissive unless the app
+%% env `allowed_schemes' is set (a list of schemes), which lets an exposed
+%% deployment forbid e.g. `file'/`http' to avoid local-file reads and SSRF.
+-spec allowed(binary() | string()) -> boolean().
+allowed(Uri) ->
+    case application:get_env(velora, allowed_schemes) of
+        {ok, L} when is_list(L) ->
+            lists:member(scheme(Uri), [to_bin(X) || X <- L]);
+        _ -> true
+    end.
+
+to_bin(A) when is_atom(A)   -> atom_to_binary(A, utf8);
+to_bin(S) when is_list(S)   -> list_to_binary(S);
+to_bin(B) when is_binary(B) -> B.
 
 %% @doc Delete prepared COGs, uploads and straggler tiles in the work dir older
 %% than TtlMs (their mtime). Returns how many files were removed. Prevents the
