@@ -33,8 +33,9 @@ pick() ->
     end.
 
 serve(C) ->
-    try velora_coordinator:job_ctx(C) of
-        {ok, Ctx} -> serve_job(C, Ctx)
+    try
+        {ok, Ctx} = velora_coordinator:job_ctx(C),
+        serve_job(C, Ctx)
     catch
         _:_ -> ok            %% coordinator gone; just pick again
     end.

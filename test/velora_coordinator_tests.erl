@@ -165,3 +165,14 @@ double_poison_single_fail_test() ->
     %% no second failure message
     receive {failed, _} -> ?assert(false) after 300 -> ok end,
     velora_coordinator:stop(C).
+
+%% A late ack after the job has aborted must not fire on_done.
+ack_after_abort_ignored_test() ->
+    C = start(tiles(1), #{}),
+    {ok, T} = velora_coordinator:next_tile(C),
+    velora_coordinator:abort(C, boom),
+    receive {failed, R} -> ?assertEqual({setup_failed, boom}, R)
+    after 2000 -> ?assert(false) end,
+    velora_coordinator:ack(C, T, undefined),
+    receive {done, _} -> ?assert(false) after 300 -> ok end,
+    velora_coordinator:stop(C).

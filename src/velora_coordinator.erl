@@ -101,6 +101,8 @@ handle_call(job_ctx, _From, S) ->
 handle_call(progress, _From, #state{done = D, total = T} = S) ->
     {reply, {map_size(D), T}, S}.
 
+handle_cast({ack, WorkerPid, _Tile, _Partial}, #state{failed = true} = S) ->
+    {noreply, clear_lease(WorkerPid, S)};
 handle_cast({ack, WorkerPid, Tile, Partial},
             #state{done = D, stats = St, total = Tot, vectors = Vectors,
                    ctx = Ctx, on_done = OnDone} = S) ->

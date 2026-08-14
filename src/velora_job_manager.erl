@@ -54,7 +54,7 @@ handle_call({search, JobId, Query, K}, _From, Jobs) ->
 
 handle_cast({completed, Id, TilePaths, Stats}, Jobs) ->
     case Jobs of
-        #{Id := J} ->
+        #{Id := #job{status = running} = J} ->
             case velora_storage:assemble(J#job.out_vsi, TilePaths) of
                 {ok, _}    -> {noreply, Jobs#{Id => J#job{status = done, tile_paths = TilePaths,
                                                           stats = Stats, finished_at = now_ms()}}};
