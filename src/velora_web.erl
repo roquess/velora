@@ -80,22 +80,37 @@ tile(Id, Z, X, Y) ->
     case filelib:is_regular(Src) of
         false -> {error, not_found};
         true  ->
-            {Ulx, Uly, Lrx, Lry} = bbox_3857(Z, X, Y),
-            Png = filename:join(velora_config:work_dir(),
-                    "t_" ++ integer_to_list(erlang:unique_integer([positive])) ++ ".png"),
-            R = velora_storage:cmd("gdal_translate",
-                    ["-q", "-of", "PNG", "-outsize", "256", "256",
-                     "-projwin_srs", "EPSG:3857",
-                     "-projwin", f(Ulx), f(Uly), f(Lrx), f(Lry),
-                     Src, Png]),
-            Res = case R of
-                      {ok, _}    -> file:read_file(Png);
-                      {error, E} -> {error, E}   %% e.g. tile fully outside data
-                  end,
-            _ = file:delete(Png),
-            _ = file:delete(Png ++ ".aux.xml"),
-            Res
+            %% tiles are deterministic per (id,z,x,y); serve from the on-disk
+            %% cache to skip GDAL entirely on repeat views and across clients
+            Cache = cache_path(Id, Z, X, Y),
+            case file:read_file(Cache) of
+                {ok, Bin} -> {ok, Bin};
+                _         -> render_tile(Src, Z, X, Y, Cache)
+            end
     end.
+
+cache_path(Id, Z, X, Y) ->
+    Name = to_list(Id) ++ "_" ++ integer_to_list(Z) ++ "_"
+           ++ integer_to_list(X) ++ "_" ++ integer_to_list(Y) ++ ".png",
+    filename:join([velora_config:work_dir(), "tc", Name]).
+
+render_tile(Src, Z, X, Y, Cache) ->
+    ok = filelib:ensure_dir(Cache),
+    {Ulx, Uly, Lrx, Lry} = bbox_3857(Z, X, Y),
+    case velora_storage:cmd("gdal_translate",
+             ["-q", "-of", "PNG", "-outsize", "256", "256",
+              "-projwin_srs", "EPSG:3857",
+              "-projwin", f(Ulx), f(Uly), f(Lrx), f(Lry), Src, Cache]) of
+        {ok, _} ->
+            _ = file:delete(Cache ++ ".aux.xml"),
+            file:read_file(Cache);
+        {error, E} ->
+            _ = file:delete(Cache),   %% e.g. tile fully outside data
+            {error, E}
+    end.
+
+to_list(B) when is_binary(B) -> binary_to_list(B);
+to_list(L) -> L.
 
 source_path(Id) when is_binary(Id) -> source_path(binary_to_list(Id));
 source_path(Id) -> filename:join(velora_config:work_dir(), "web_" ++ Id ++ ".tif").
@@ -132,7 +147,7 @@ sweep(TtlMs) ->
     Dir = velora_config:work_dir(),
     Now = erlang:system_time(millisecond),
     Files = lists:append([filelib:wildcard(filename:join(Dir, P))
-                          || P <- ["web_*", "upload_*", "t_*.png"]]),
+                          || P <- ["web_*", "upload_*", "t_*.png", "tc/*.png"]]),
     Stale = [F || F <- Files, is_stale(F, Now, TtlMs)],
     _ = [file:delete(F) || F <- Stale],
     length(Stale).

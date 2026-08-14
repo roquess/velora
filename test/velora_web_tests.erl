@@ -105,6 +105,36 @@ do_prepare_tile() ->
     {ok, Png} = velora_web:tile(Id, Z, X, Y),
     ?assertMatch(<<137, 80, 78, 71, _/binary>>, Png).
 
+%% A rendered tile is cached to disk; a repeat request is served from the cache
+%% (same bytes, file not re-rendered).
+tile_cache_test_() ->
+    {timeout, 60, fun() ->
+        case gdal_available() of
+            false -> ?debugMsg("GDAL not available, skipping"), ok;
+            true  -> do_tile_cache()
+        end
+    end}.
+
+do_tile_cache() ->
+    velora_storage:ensure_gdal_env(),
+    Dir = velora_worker_tests:tmp_dir(),
+    Scene = velora_worker_tests:make_2band_u16(Dir, "cachescene", 16, 16),
+    {ok, Id, [[S, W], [N, E]], _} = velora_web:prepare(list_to_binary(Scene)),
+    Z = 4,
+    {X, Y} = lonlat_to_xy((W + E) / 2, (S + N) / 2, Z),
+    Cache = filename:join([velora_config:work_dir(), "tc",
+                binary_to_list(Id) ++ "_4_" ++ integer_to_list(X) ++ "_"
+                ++ integer_to_list(Y) ++ ".png"]),
+    _ = file:delete(Cache),
+    {ok, P1} = velora_web:tile(Id, Z, X, Y),          %% renders + caches
+    ?assert(filelib:is_regular(Cache)),
+    ?assertMatch(<<137, 80, 78, 71, _/binary>>, P1),
+    Mt1 = filelib:last_modified(Cache),
+    timer:sleep(1100),
+    {ok, P2} = velora_web:tile(Id, Z, X, Y),          %% cache hit
+    ?assertEqual(P1, P2),
+    ?assertEqual(Mt1, filelib:last_modified(Cache)).  %% not re-rendered
+
 lonlat_to_xy(Lon, Lat, Z) ->
     N = math:pow(2, Z),
     X = trunc((Lon + 180.0) / 360.0 * N),
