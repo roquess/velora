@@ -125,16 +125,18 @@ scheme(Uri0) ->
         _                     -> <<"file">>
     end.
 
-%% @doc Whether a source URI's scheme is permitted. Permissive unless the app
-%% env `allowed_schemes' is set (a list of schemes), which lets an exposed
-%% deployment forbid e.g. `file'/`http' to avoid local-file reads and SSRF.
+%% @doc Whether a source URI's scheme is permitted. Default-deny: unless the
+%% app env `allowed_schemes' is set (a list of schemes), only https/s3/gs/work
+%% are fetchable, so `file'/`http' are refused out of the box to avoid
+%% local-file reads and SSRF. An exposed deployment widens or narrows the set
+%% via `allowed_schemes'.
 -spec allowed(binary() | string()) -> boolean().
 allowed(Uri) ->
-    case application:get_env(velora, allowed_schemes) of
-        {ok, L} when is_list(L) ->
-            lists:member(scheme(Uri), [to_bin(X) || X <- L]);
-        _ -> true
-    end.
+    L = case application:get_env(velora, allowed_schemes) of
+            {ok, LL} when is_list(LL) -> LL;
+            _ -> [<<"https">>, <<"s3">>, <<"gs">>, <<"work">>]
+        end,
+    lists:member(scheme(Uri), [to_bin(X) || X <- L]).
 
 to_bin(A) when is_atom(A)   -> atom_to_binary(A, utf8);
 to_bin(S) when is_list(S)   -> list_to_binary(S);

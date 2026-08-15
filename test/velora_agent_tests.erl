@@ -23,8 +23,16 @@ tiles_local_test_() ->
                 velora_storage:ensure_gdal_env(),
                 Dir = velora_worker_tests:tmp_dir(),
                 Scene = velora_worker_tests:make_2band_u16(Dir, "agentscene", 16, 16),
-                Cards = velora_agent:handle(#{intent => tiles,
-                                              query => list_to_binary("file://" ++ Scene)}),
+                %% local `file://' fixture: velora_web:allowed/1 denies `file' by
+                %% default now (SSRF / local-file-read hardening), so opt it back
+                %% in for this call only; the product default stays deny.
+                application:set_env(velora, allowed_schemes, [file, https, s3, gs, work]),
+                Cards = try
+                            velora_agent:handle(#{intent => tiles,
+                                                  query => list_to_binary("file://" ++ Scene)})
+                        after
+                            application:unset_env(velora, allowed_schemes)
+                        end,
                 ?assertMatch([#{type := <<"raster">>, tiles := _} | _], Cards)
         end
     end}.

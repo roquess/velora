@@ -51,8 +51,21 @@ scheme_test() ->
 
 allowed_default_test() ->
     application:unset_env(velora, allowed_schemes),
-    ?assert(velora_web:allowed(<<"file:///x.tif">>)),
-    ?assert(velora_web:allowed(<<"http://h/x.tif">>)).
+    ?assertNot(velora_web:allowed(<<"file:///x.tif">>)),
+    ?assertNot(velora_web:allowed(<<"http://h/x.tif">>)).
+
+%% The default (no `allowed_schemes' configured) denies local-file and plain-http
+%% sources to close SSRF / local-file-read; only https/s3/gs/work are fetchable
+%% out of the box. Operators widen the allowlist via `allowed_schemes'.
+allowed_default_denies_file_http_test() ->
+    application:unset_env(velora, allowed_schemes),
+    ?assertNot(velora_web:allowed(<<"file:///etc/hosts">>)),
+    ?assertNot(velora_web:allowed(<<"http://169.254.169.254/latest/meta-data">>)),
+    ?assertNot(velora_web:allowed(<<"/tmp/x.tif">>)),          %% bare path => file
+    ?assert(velora_web:allowed(<<"https://host/scene.tif">>)),
+    ?assert(velora_web:allowed(<<"s3://bucket/scene.tif">>)),
+    ?assert(velora_web:allowed(<<"gs://bucket/scene.tif">>)),
+    ?assert(velora_web:allowed(<<"work://uploads/x.tif">>)).
 
 allowed_restricted_test() ->
     application:set_env(velora, allowed_schemes, [https, s3]),
@@ -90,7 +103,10 @@ do_agent_query() ->
     %% scheme ("://"); a bare filesystem path is otherwise treated as a place.
     Uri = <<"file://", (list_to_binary(Scene))/binary>>,
     Body = jsx:encode(#{uri => Uri}),
-    [R] = velora_agent_h:handle_query(Body),
+    %% this test drives velora_web:prepare/1 with a local `file://' fixture, so
+    %% opt `file' back into the allowlist for the duration of the call (the
+    %% product default stays deny; only the test widens it)
+    [R] = with_file_scheme_allowed(fun() -> velora_agent_h:handle_query(Body) end),
     ?assertEqual(<<"raster">>, maps:get(type, R)),
     ?assert(is_binary(maps:get(id, R))),
     ?assertMatch([[_, _], [_, _]], maps:get(bounds, R)),
@@ -142,7 +158,9 @@ do_prepare_tile() ->
     velora_storage:ensure_gdal_env(),
     Dir   = velora_worker_tests:tmp_dir(),
     Scene = velora_worker_tests:make_2band_u16(Dir, "webscene", 16, 16),
-    R = velora_web:prepare(list_to_binary(Scene)),
+    %% local fixture: opt `file' back into the default-deny allowlist for the
+    %% product-facing `prepare/1' call only; product default stays deny.
+    R = with_file_scheme_allowed(fun() -> velora_web:prepare(list_to_binary(Scene)) end),
     ?assertMatch({ok, _, [[_, _], [_, _]], _}, R),
     {ok, Id, [[S, W], [N, E]], NZ} = R,
     ?assert(is_integer(NZ) andalso NZ >= 0),
@@ -166,7 +184,8 @@ do_tile_cache() ->
     velora_storage:ensure_gdal_env(),
     Dir = velora_worker_tests:tmp_dir(),
     Scene = velora_worker_tests:make_2band_u16(Dir, "cachescene", 16, 16),
-    {ok, Id, [[S, W], [N, E]], _} = velora_web:prepare(list_to_binary(Scene)),
+    {ok, Id, [[S, W], [N, E]], _} =
+        with_file_scheme_allowed(fun() -> velora_web:prepare(list_to_binary(Scene)) end),
     Z = 4,
     {X, Y} = lonlat_to_xy((W + E) / 2, (S + N) / 2, Z),
     Cache = filename:join([velora_config:work_dir(), "tc",
@@ -193,7 +212,8 @@ prepare_ndvi_test_() ->
                 Dir = velora_worker_tests:tmp_dir(),
                 Scene = velora_worker_tests:make_2band_u16(Dir, "ndvi_src", 32, 32),
                 B = list_to_binary(Scene),
-                {ok, Id, [[S,W],[N,E]], NZ, Stats} = velora_web:prepare_ndvi(B, B),
+                {ok, Id, [[S,W],[N,E]], NZ, Stats} =
+                    with_file_scheme_allowed(fun() -> velora_web:prepare_ndvi(B, B) end),
                 ?assert(is_binary(Id)),
                 ?assert(N >= S andalso E >= W),
                 ?assert(is_integer(NZ)),
@@ -209,7 +229,8 @@ info_test_() ->
                 velora_storage:ensure_gdal_env(),
                 Dir = velora_worker_tests:tmp_dir(),
                 Scene = velora_worker_tests:make_2band_u16(Dir, "info_src", 16, 16),
-                {ok, Info} = velora_web:info(list_to_binary(Scene)),
+                {ok, Info} =
+                    with_file_scheme_allowed(fun() -> velora_web:info(list_to_binary(Scene)) end),
                 ?assertMatch(#{bands := _, size := _, crs := _}, Info)
         end
     end}.
@@ -226,3 +247,13 @@ gdal_available() ->
         {error, {gdalinfo_failed, {spawn_failed, _}}} -> false;
         _ -> true
     end.
+
+%% GDAL-backed tests exercise `prepare/1', `info/1' and `prepare_ndvi/2' against
+%% local filesystem fixtures. The product default now denies `file' sources
+%% (SSRF / local-file-read hardening), so these tests opt `file' back into the
+%% allowlist for the duration of the call; the product default itself is
+%% untouched outside the fun.
+with_file_scheme_allowed(Fun) ->
+    application:set_env(velora, allowed_schemes, [file, https, s3, gs, work]),
+    try Fun()
+    after application:unset_env(velora, allowed_schemes) end.

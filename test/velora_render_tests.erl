@@ -26,6 +26,10 @@ prepare_tile_local_test_() ->
 do_local() ->
     {ok, Reg} = velora_render_registry:start_link(),
     application:set_env(velora, render_offload, self),
+    %% local fixture: velora_web:allowed/1 denies `file' by default now (SSRF /
+    %% local-file-read hardening), so opt it back in for this test only; the
+    %% product default stays deny.
+    application:set_env(velora, allowed_schemes, [file, https, s3, gs, work]),
     try
         velora_storage:ensure_gdal_env(),
         Dir = velora_worker_tests:tmp_dir(),
@@ -36,6 +40,7 @@ do_local() ->
         ?assertMatch({ok, <<137, 80, 78, 71, _/binary>>}, velora_render:tile(Id, 4, X, Y))
     after
         application:unset_env(velora, render_offload),
+        application:unset_env(velora, allowed_schemes),
         gen_server:stop(Reg)
     end.
 
