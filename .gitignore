@@ -1,4 +1,6 @@
 _build/
+native/*/target/
+native/*/rebar.lock
 *.beam
 erl_crash.dump
 rebar3.crashdump
