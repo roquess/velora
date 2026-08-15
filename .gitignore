@@ -2,7 +2,8 @@ _build/
 *.beam
 erl_crash.dump
 rebar3.crashdump
-docs/
+docs/*
+!docs/superpowers/
 test/e2e/node_modules/
 test/e2e/fixtures/scene.raw
 test/e2e/fixtures/scene.hdr
