@@ -8,13 +8,15 @@
 -export([prepare/1, tile/4, source_path/1, sweep/1, info/1, prepare_ndvi/2]).
 %% exported for unit tests
 -export([bbox_3857/3, fake_extent/2, jdecode/1, native_zoom/1, scheme/1, allowed/1,
-         source_size_ok/2, tile_key/4, tiles_cache/0, render_count/0, reset_render_count/0]).
+         source_size_ok/2, tile_key/4, tiles_cache/0, render_count/0, reset_render_count/0,
+         prepare_cache/0, canonical/1, source_hash/1]).
 
 -include_lib("kernel/include/file.hrl").
 
 -define(SHIFT, 20037508.342789244).   %% half the web-mercator world extent (m)
 -define(NDVI_MAX_DIM, 1024).          %% cap the NDVI working grid's larger axis
 -define(TILES_CACHE_STATE, {?MODULE, tiles_cache_state}). %% persistent_term key
+-define(PREPARE_CACHE_STATE, {?MODULE, prepare_cache_state}). %% persistent_term key
 -define(RENDER_COUNT, {?MODULE, render_count}).            %% persistent_term key
 
 %% @doc Ingest a source URI to a local web-mercator COG; returns an id, lat/lon
@@ -28,19 +30,40 @@ prepare(Uri) ->
         true  -> velora_render_limiter:with_slot(fun() -> prepare_1(Uri) end)
     end.
 
+%% Memo check: a cache hit whose COG still exists on disk short-circuits the
+%% whole warp; a miss, or a hit whose COG was swept by the janitor, falls
+%% through to the heavy path (`prepare_fresh/2'), which stores a fresh memo
+%% entry on success. When the cache NIF is unavailable, this degrades to the
+%% original unmemoized behavior (see `prepare_cache/0').
 prepare_1(Uri) ->
+    case prepare_cache() of
+        {ok, C} ->
+            Hash = source_hash(Uri),
+            case velora_cache:get(C, Hash) of
+                {ok, Bin} ->
+                    #{id := Id, bounds := B, nz := NZ} = binary_to_term(Bin),
+                    case filelib:is_regular(source_path(Id)) of
+                        true  -> {ok, list_to_binary(Id), B, NZ};   %% hit, no warp
+                        false -> prepare_fresh(Uri, {memo, C, Hash})  %% stale memo
+                    end;
+                miss -> prepare_fresh(Uri, {memo, C, Hash})
+            end;
+        unavailable -> prepare_fresh(Uri, none)
+    end.
+
+prepare_fresh(Uri, Memo) ->
     Vsi = velora_storage:to_vsi(Uri),
     case raw_info(Vsi) of
         {ok, M} ->
             MaxMP = application:get_env(velora, max_source_megapixels, 500),
             case source_size_ok(M, MaxMP) of
                 {error, _} = TooBig -> TooBig;
-                ok -> prepare_2(Vsi, M)
+                ok -> prepare_2(Vsi, M, Memo)
             end;
         _ -> {error, unreadable}
     end.
 
-prepare_2(Vsi, M) ->
+prepare_2(Vsi, M, Memo) ->
     Id   = integer_to_list(erlang:unique_integer([positive])),
     NB   = length(maps:get(<<"bands">>, M, [])),
     Warp = filename:join(velora_config:work_dir(), "web_" ++ Id ++ "_3857.tif"),
@@ -65,9 +88,21 @@ prepare_2(Vsi, M) ->
     _ = file:delete(Warp),
     _ = case Vrt of undefined -> ok; _ -> file:delete(Vrt) end,
     case R of
-        {ok, B} -> {ok, list_to_binary(Id), B, native_zoom(Out)};
-        Err     -> Err
+        {ok, B} ->
+            NZ = native_zoom(Out),
+            ok = memo_put(Memo, Id, B, NZ),
+            {ok, list_to_binary(Id), B, NZ};
+        Err -> Err
     end.
+
+%% Store the freshly-prepared `{Id,Bounds,NativeZoom}' under the memo hash
+%% computed before the warp, keeping the string `Id' (not the binary form
+%% `prepare/1' returns) so a later hit's `source_path(Id)' check works the
+%% same way as here. No-op when memoization is unavailable for this call.
+memo_put({memo, C, Hash}, Id, B, NZ) ->
+    velora_cache:put(C, Hash, term_to_binary(#{id => Id, bounds => B, nz => NZ}));
+memo_put(none, _Id, _B, _NZ) ->
+    ok.
 
 %% @doc Whether a `gdalinfo -json' metadata map's pixel count is within
 %% `MaxMP' megapixels. Pure and GDAL-free so it's unit-testable in isolation;
@@ -180,6 +215,47 @@ init_tiles_cache() ->
     catch
         _:_ -> unavailable
     end.
+
+%% @doc Whether the `prepare/1' memoization cache is usable. Same lazy
+%% `persistent_term'-memoized probe pattern as `tiles_cache/0': a NIF-absent
+%% platform/build is only probed once. Capacity from app env
+%% `prepare_cache_entries' (default 256), policy `lru' (recency, not
+%% scan-resistance, is what matters for a small set of distinct sources).
+-spec prepare_cache() -> {ok, prepare} | unavailable.
+prepare_cache() ->
+    case persistent_term:get(?PREPARE_CACHE_STATE, undefined) of
+        undefined ->
+            State = init_prepare_cache(),
+            persistent_term:put(?PREPARE_CACHE_STATE, State),
+            State;
+        State -> State
+    end.
+
+init_prepare_cache() ->
+    Cap = application:get_env(velora, prepare_cache_entries, 256),
+    try velora_cache:new(prepare, #{capacity => Cap, policy => lru}) of
+        ok         -> {ok, prepare};
+        {error, _} -> unavailable
+    catch
+        _:_ -> unavailable
+    end.
+
+%% @doc Normalize a source URI for hashing: accept binary or string, trim
+%% surrounding whitespace. Keeps the full URI string as-is (scheme, path and
+%% query together) rather than trying to strip volatile query tokens (e.g.
+%% signed-S3 credentials): two different callers presenting different
+%% credentials for the same `s3://bucket/key' object will therefore share one
+%% memoized render. That is acceptable — the underlying object content is the
+%% same — but distinct object paths never collide since the whole URI is
+%% hashed.
+-spec canonical(binary() | string()) -> binary().
+canonical(Uri) when is_list(Uri) -> canonical(list_to_binary(Uri));
+canonical(Uri) when is_binary(Uri) -> string:trim(Uri).
+
+%% @doc Stable memoization key for a source URI: sha256 of `canonical/1',
+%% hex-encoded.
+-spec source_hash(binary() | string()) -> binary().
+source_hash(Uri) -> binary:encode_hex(crypto:hash(sha256, canonical(Uri))).
 
 %% @doc Canonical binary cache key for one `{Id,Z,X,Y}' tile coordinate.
 -spec tile_key(binary() | string(), integer(), integer(), integer()) -> binary().

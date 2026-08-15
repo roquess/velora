@@ -248,6 +248,91 @@ do_tile_memory_hit() ->
     ?assertEqual(P1, P2),
     ?assertEqual(1, velora_web:render_count()).
 
+%% ---- prepare/1 memoization key (canonical/1, source_hash/1) ----
+
+canonical_trims_whitespace_test() ->
+    ?assertEqual(velora_web:canonical(<<"https://h/x.tif">>),
+                 velora_web:canonical(<<"  https://h/x.tif  ">>)).
+
+canonical_normalizes_list_input_test() ->
+    ?assertEqual(velora_web:canonical(<<"https://h/x.tif">>),
+                 velora_web:canonical("https://h/x.tif")).
+
+source_hash_same_uri_same_hash_test() ->
+    ?assertEqual(velora_web:source_hash(<<"https://h/x.tif">>),
+                 velora_web:source_hash(<<"https://h/x.tif">>)),
+    %% list vs binary input normalizes to the same hash
+    ?assertEqual(velora_web:source_hash(<<"https://h/x.tif">>),
+                 velora_web:source_hash("https://h/x.tif")),
+    %% leading/trailing whitespace does not change the hash
+    ?assertEqual(velora_web:source_hash(<<"https://h/x.tif">>),
+                 velora_web:source_hash(<<"  https://h/x.tif  ">>)).
+
+source_hash_distinct_uris_test() ->
+    ?assertNotEqual(velora_web:source_hash(<<"https://h/x.tif">>),
+                     velora_web:source_hash(<<"https://h/y.tif">>)).
+
+%% ---- prepare/1 memoization by source hash ----
+
+%% Preparing the same source URI twice reuses the memoized COG: the second
+%% call returns the same `Id' and does not re-warp (the COG's mtime is
+%% unchanged). Skips cleanly when the velora_cache NIF isn't loaded for this
+%% platform/build (`prepare/1' then behaves as before: no memo, and each call
+%% would mint its own COG — see `prepare_tile_test_' for that unmemoized
+%% path).
+prepare_memo_hit_test_() ->
+    {timeout, 60, fun() ->
+        case velora_web:prepare_cache() =:= unavailable of
+            true  -> ?debugMsg("velora_cache NIF not loaded, skipping"), ok;
+            false ->
+                case gdal_available() of
+                    false -> ?debugMsg("GDAL not available, skipping"), ok;
+                    true  -> do_prepare_memo_hit()
+                end
+        end
+    end}.
+
+do_prepare_memo_hit() ->
+    velora_storage:ensure_gdal_env(),
+    Dir = velora_worker_tests:tmp_dir(),
+    Scene = velora_worker_tests:make_2band_u16(Dir, "memoscene", 16, 16),
+    Uri = list_to_binary(Scene),
+    {ok, Id1, _, _} = with_file_scheme_allowed(fun() -> velora_web:prepare(Uri) end),
+    Cog1 = velora_web:source_path(Id1),
+    ?assert(filelib:is_regular(Cog1)),
+    Mt1 = filelib:last_modified(Cog1),
+    timer:sleep(1100),
+    {ok, Id2, _, _} = with_file_scheme_allowed(fun() -> velora_web:prepare(Uri) end),
+    ?assertEqual(Id1, Id2),
+    ?assertEqual(Mt1, filelib:last_modified(Cog1)).   %% not re-warped
+
+%% If the memoized COG was swept from disk (janitor TTL), the memo entry is
+%% stale: `prepare/1' re-warps and returns a fresh, valid result instead of
+%% crashing or returning a dangling id.
+prepare_memo_stale_test_() ->
+    {timeout, 60, fun() ->
+        case velora_web:prepare_cache() =:= unavailable of
+            true  -> ?debugMsg("velora_cache NIF not loaded, skipping"), ok;
+            false ->
+                case gdal_available() of
+                    false -> ?debugMsg("GDAL not available, skipping"), ok;
+                    true  -> do_prepare_memo_stale()
+                end
+        end
+    end}.
+
+do_prepare_memo_stale() ->
+    velora_storage:ensure_gdal_env(),
+    Dir = velora_worker_tests:tmp_dir(),
+    Scene = velora_worker_tests:make_2band_u16(Dir, "memostale", 16, 16),
+    Uri = list_to_binary(Scene),
+    {ok, Id1, _, _} = with_file_scheme_allowed(fun() -> velora_web:prepare(Uri) end),
+    ok = file:delete(velora_web:source_path(Id1)),
+    R = with_file_scheme_allowed(fun() -> velora_web:prepare(Uri) end),
+    ?assertMatch({ok, _, [[_, _], [_, _]], _}, R),
+    {ok, Id2, _, _} = R,
+    ?assert(filelib:is_regular(velora_web:source_path(Id2))).
+
 %% ---- tile cache key ----
 
 %% Different {Id,Z,X,Y} coordinates never collide; identical coordinates

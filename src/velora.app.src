@@ -3,7 +3,7 @@
     {vsn, "0.1.0"},
     {registered, [velora_sup, velora_job_manager, velora_worker_pool]},
     {mod, {velora_app, []}},
-    {applications, [kernel, stdlib, inets, ssl, cowboy, jsx, rast, kvex, em_pop]},
+    {applications, [kernel, stdlib, inets, ssl, crypto, cowboy, jsx, rast, kvex, em_pop]},
     {env, [
         {http_port, 8080},
         {peers, []},
