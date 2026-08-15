@@ -157,6 +157,38 @@ do_tile_cache() ->
     ?assertEqual(P1, P2),
     ?assertEqual(Mt1, filelib:last_modified(Cache)).  %% not re-rendered
 
+%% ---- NDVI + info for the emergence agent ----
+
+prepare_ndvi_test_() ->
+    {timeout, 60, fun() ->
+        case gdal_available() of
+            false -> ?debugMsg("GDAL not available, skipping"), ok;
+            true  ->
+                velora_storage:ensure_gdal_env(),
+                Dir = velora_worker_tests:tmp_dir(),
+                Scene = velora_worker_tests:make_2band_u16(Dir, "ndvi_src", 32, 32),
+                B = list_to_binary(Scene),
+                {ok, Id, [[S,W],[N,E]], NZ, Stats} = velora_web:prepare_ndvi(B, B),
+                ?assert(is_binary(Id)),
+                ?assert(N >= S andalso E >= W),
+                ?assert(is_integer(NZ)),
+                ?assertMatch(#{mean := _, min := _, max := _}, Stats)
+        end
+    end}.
+
+info_test_() ->
+    {timeout, 30, fun() ->
+        case gdal_available() of
+            false -> ?debugMsg("GDAL not available, skipping"), ok;
+            true  ->
+                velora_storage:ensure_gdal_env(),
+                Dir = velora_worker_tests:tmp_dir(),
+                Scene = velora_worker_tests:make_2band_u16(Dir, "info_src", 16, 16),
+                {ok, Info} = velora_web:info(list_to_binary(Scene)),
+                ?assertMatch(#{bands := _, size := _, crs := _}, Info)
+        end
+    end}.
+
 lonlat_to_xy(Lon, Lat, Z) ->
     N = math:pow(2, Z),
     X = trunc((Lon + 180.0) / 360.0 * N),

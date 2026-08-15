@@ -5,13 +5,14 @@
 %%% overview level and window the tile covers, so the browser only ever fetches
 %%% the currently-visible tiles and never the whole image.
 -module(velora_web).
--export([prepare/1, tile/4, source_path/1, sweep/1]).
+-export([prepare/1, tile/4, source_path/1, sweep/1, info/1, prepare_ndvi/2]).
 %% exported for unit tests
 -export([bbox_3857/3, fake_extent/2, jdecode/1, native_zoom/1, scheme/1, allowed/1]).
 
 -include_lib("kernel/include/file.hrl").
 
 -define(SHIFT, 20037508.342789244).   %% half the web-mercator world extent (m)
+-define(NDVI_MAX_DIM, 1024).          %% cap the NDVI working grid's larger axis
 
 %% @doc Ingest a source URI to a local web-mercator COG; returns an id, lat/lon
 %% bounds [[S,W],[N,E]], and the data's native web-mercator zoom (so the client
@@ -26,7 +27,7 @@ prepare(Uri) ->
 
 prepare_1(Uri) ->
     Vsi = velora_storage:to_vsi(Uri),
-    case info(Vsi) of
+    case raw_info(Vsi) of
         {ok, M} ->
             Id   = integer_to_list(erlang:unique_integer([positive])),
             NB   = length(maps:get(<<"bands">>, M, [])),
@@ -190,11 +191,130 @@ fake_extent(_, _) -> {-10.0, 10.0, 10.0, -10.0}.
 has_crs(#{<<"coordinateSystem">> := #{<<"wkt">> := Wkt}}) when is_binary(Wkt), Wkt =/= <<>> -> true;
 has_crs(_) -> false.
 
-info(Vsi) ->
+raw_info(Vsi) ->
     case velora_storage:cmd("gdalinfo", ["-json", Vsi]) of
         {ok, Json} -> try {ok, jdecode(Json)} catch _:_ -> error end;
         _ -> error
     end.
+
+%% @doc Compact `gdalinfo -json' metadata for a source: pixel `size' `[W,H]',
+%% `bands' count, coordinate-system `crs' WKT, and GDAL `driver' short name.
+%% Used by the emergence agent to answer an `info' intent.
+-spec info(binary() | string()) -> {ok, map()} | {error, term()}.
+info(Uri) ->
+    In = velora_storage:to_vsi(Uri),
+    case velora_storage:cmd("gdalinfo", ["-json", In]) of
+        {ok, Out} ->
+            J = jdecode(Out),
+            {ok, #{size   => maps:get(<<"size">>, J, [0, 0]),
+                   bands  => length(maps:get(<<"bands">>, J, [])),
+                   crs    => case J of
+                                 #{<<"coordinateSystem">> := #{<<"wkt">> := W}} -> W;
+                                 _ -> <<"unknown">>
+                             end,
+                   driver => maps:get(<<"driverShortName">>, J, <<"?">>)}};
+        {error, R} -> {error, R}
+    end.
+
+%% @doc Compute NDVI from a Red and a Nir source and lay the result out as a
+%% web-mercator Byte COG identical to `prepare/1''s, so `tile/4' serves it
+%% unchanged. Both sources are warped to one shared, size-capped 3857 grid, read
+%% as `u16' band binaries, and combined with `rast:ndvi_u16/2' (which returns a
+%% little-endian `f32' NDVI binary in the real [-1,1] range). `Stats' are the
+%% mean/min/max over those f32 NDVI pixels. Returns the tile id, lat/lon bounds
+%% [[S,W],[N,E]], the data's native web-mercator zoom, and `Stats'.
+-spec prepare_ndvi(binary() | string(), binary() | string()) ->
+        {ok, binary(), [[float()]], integer(), map()} | {error, term()}.
+prepare_ndvi(RedUri, NirUri) ->
+    case allowed(RedUri) andalso allowed(NirUri) of
+        false -> {error, {scheme_not_allowed, scheme(RedUri)}};
+        true  -> prepare_ndvi_1(RedUri, NirUri)
+    end.
+
+prepare_ndvi_1(RedUri, NirUri) ->
+    Id   = integer_to_list(erlang:unique_integer([positive])),
+    Dir  = velora_config:work_dir(),
+    RedW = filename:join(Dir, "ndvi_" ++ Id ++ "_red_3857.tif"),
+    NirW = filename:join(Dir, "ndvi_" ++ Id ++ "_nir_3857.tif"),
+    F32  = filename:join(Dir, "ndvi_" ++ Id ++ "_f32.tif"),
+    Out  = source_path(Id),
+    R = try
+            {W, H, Ulx, Uly, Lrx, Lry} = warp_capped(RedUri, RedW),
+            ok = warp_to_grid(NirUri, NirW, {W, H, Ulx, Uly, Lrx, Lry}),
+            {ok, RedBin} = read_band1(RedW),
+            {ok, NirBin} = read_band1(NirW),
+            {ok, Ndvi}   = rast:ndvi_u16(NirBin, RedBin),
+            %% f32 NDVI GeoTIFF in 3857, then a Byte COG laid out like prepare/1.
+            %% NDVI's known [-1,1] range maps to 0..255 (a fixed, meaningful
+            %% stretch), unlike prepare/1's data-derived auto -scale.
+            ok = velora_storage:write_tile(F32, Ndvi, W, H, "EPSG:3857",
+                                           {Ulx, Uly, Lrx, Lry}),
+            {ok, _} = velora_storage:cmd("gdal_translate",
+                        ["-q", "-of", "COG", "-ot", "Byte",
+                         "-scale", "-1", "1", "0", "255", F32, Out]),
+            {ok, Bounds} = bounds(Out),
+            {ok, Bounds, ndvi_stats(Ndvi)}
+        catch _:E -> {error, {prepare_ndvi, E}} end,
+    _ = [file:delete(P) || P <- [RedW, NirW, F32]],
+    case R of
+        {ok, B, Stats} -> {ok, list_to_binary(Id), B, native_zoom(Out), Stats};
+        Err            -> Err
+    end.
+
+%% Warp a source to EPSG:3857 as a UInt16 GeoTIFF, capping the larger axis at
+%% ?NDVI_MAX_DIM (square pixels: gdalwarp derives the free axis). -ot UInt16
+%% guarantees the band format rast:ndvi_u16/2 requires. Returns the output grid
+%% {W, H, Ulx, Uly, Lrx, Lry}.
+warp_capped(Uri, OutTif) ->
+    In     = velora_storage:to_vsi(Uri),
+    TsArgs = case info(Uri) of
+                 {ok, #{size := [W, H]}} when is_integer(W), is_integer(H), W >= H ->
+                     ["-ts", integer_to_list(min(W, ?NDVI_MAX_DIM)), "0"];
+                 {ok, #{size := [W, H]}} when is_integer(W), is_integer(H) ->
+                     ["-ts", "0", integer_to_list(min(H, ?NDVI_MAX_DIM))];
+                 _ ->
+                     ["-ts", integer_to_list(?NDVI_MAX_DIM), "0"]
+             end,
+    case velora_storage:cmd("gdalwarp",
+             ["-q", "-t_srs", "EPSG:3857", "-r", "bilinear", "-ot", "UInt16"]
+             ++ TsArgs ++ ["-of", "GTiff", In, OutTif]) of
+        {ok, _}    -> grid_of(OutTif);
+        {error, E} -> erlang:error({warp_red, E})
+    end.
+
+%% Warp a source onto an existing grid's exact extent and size (pixel-aligned
+%% with warp_capped's output), as UInt16.
+warp_to_grid(Uri, OutTif, {W, H, Ulx, Uly, Lrx, Lry}) ->
+    In = velora_storage:to_vsi(Uri),
+    case velora_storage:cmd("gdalwarp",
+             ["-q", "-t_srs", "EPSG:3857", "-r", "bilinear", "-ot", "UInt16",
+              "-te", f(Ulx), f(Lry), f(Lrx), f(Uly),
+              "-ts", integer_to_list(W), integer_to_list(H),
+              "-of", "GTiff", In, OutTif]) of
+        {ok, _}    -> ok;
+        {error, E} -> erlang:error({warp_nir, E})
+    end.
+
+%% Pixel size and 3857 extent of a raster from its geoTransform.
+grid_of(Path) ->
+    {ok, Json} = velora_storage:cmd("gdalinfo", ["-json", Path]),
+    M = jdecode(Json),
+    [W, H] = maps:get(<<"size">>, M),
+    [G0, G1, _, G3, _, G5] = maps:get(<<"geoTransform">>, M),
+    {W, H, G0, G3, G0 + W * G1, G3 + H * G5}.
+
+%% Read band 1 of a raster as a raw little-endian binary in its native dtype.
+read_band1(Path) ->
+    {ok, Hd = #{width := W, height := H}} = rast_gdal:open(Path),
+    R = rast_gdal:read_window(Hd, #{x => 0, y => 0, w => W, h => H}, 1),
+    ok = rast_gdal:close(Hd),
+    R.
+
+%% mean/min/max over a little-endian f32 NDVI binary, via velora_stats.
+ndvi_stats(NdviBin) ->
+    P = velora_stats:tile_stats(NdviBin, {-1.0, 1.0}, 64),
+    F = velora_stats:finalize(P, {-1.0, 1.0}),
+    #{mean => maps:get(mean, F), min => maps:get(min, F), max => maps:get(max, F)}.
 
 %% gdalinfo output can be prefixed by GDAL warnings (stderr merged into stdout),
 %% so decode from the first '{'.
