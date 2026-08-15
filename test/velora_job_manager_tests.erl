@@ -50,12 +50,20 @@ job_manager_survives_coordinator_crash_test_() ->
         end
     end}.
 
+%% J1 and J2 each get their OWN freshly-written scene file, rather than sharing
+%% one: J1's coordinator is killed while workers may still hold open GDAL
+%% read handles on its scene, and starting J2 against that same path moments
+%% later raced a stale/still-closing handle against a fresh `rast_gdal:open'
+%% on Windows (observed as an intermittent `gdalinfo_parse' on the shared
+%% file). Giving each job its own file removes the shared mutable resource
+%% instead of adding a wait around an external library's handle lifecycle we
+%% don't control.
 do_coord_crash() ->
     Dir = velora_worker_tests:tmp_dir(),
-    Scene = velora_worker_tests:make_2band_u16(Dir, "jmcrash", 16, 16),
     Req = fun() ->
-        Out = filename:join(Dir, "jmcrash_"
-                ++ integer_to_list(erlang:unique_integer([positive])) ++ ".tif"),
+        N = integer_to_list(erlang:unique_integer([positive])),
+        Scene = velora_worker_tests:make_2band_u16(Dir, "jmcrash_" ++ N, 16, 16),
+        Out = filename:join(Dir, "jmcrash_out_" ++ N ++ ".tif"),
         #{op => ndvi,
           sources => [#{uri => list_to_binary(Scene), 'band' => 1},
                       #{uri => list_to_binary(Scene), 'band' => 2}],
@@ -94,26 +102,39 @@ persistence_test_() ->
         end
     end}.
 
+%% The whole body runs under try/after so `velora' is always stopped, even if
+%% an assertion fails partway through (e.g. a one-off GDAL read hiccup turns
+%% the job's status into `error' instead of `done'). Without this, a single
+%% failed assertion here used to leak the running application for the rest of
+%% the eunit run: every later suite that assumes a clean, app-free environment
+%% (velora_jobs_tests, velora_render_tests, velora_render_limiter_tests,
+%% velora_worker_tests -- all of which start their own `pg' scope or
+%% `velora_render_limiter' under the same registered names the app uses)
+%% would then fail with `{already_started, Pid}' against this leftover
+%% instance, cascading one real failure into many unrelated ones.
 do_persist() ->
     {ok, _} = application:ensure_all_started(velora),
-    Dir = velora_worker_tests:tmp_dir(),
-    Scene = velora_worker_tests:make_2band_u16(Dir, "persist", 12, 12),
-    Out = filename:join(Dir, "persist_"
-            ++ integer_to_list(erlang:unique_integer([positive])) ++ ".tif"),
-    Req = #{op => ndvi,
-            sources => [#{uri => list_to_binary(Scene), 'band' => 1},
-                        #{uri => list_to_binary(Scene), 'band' => 2}],
-            out_uri => list_to_binary("file://" ++ Out),
-            tile => {4, 4}},
-    {ok, JobId} = velora_job_manager:submit(Req),
-    ok = poll_done(JobId, 60),
-    ok = application:stop(velora),                 %% flush + close the store
-    {ok, _} = application:ensure_all_started(velora),
-    Status = velora_job_manager:status(JobId),     %% reloaded from disk
-    _ = application:stop(velora),
-    ?assertMatch(#{status := done}, Status),
-    #{stats := Stats} = Status,
-    ?assertEqual(12 * 12, maps:get(count, Stats)).
+    try
+        Dir = velora_worker_tests:tmp_dir(),
+        Scene = velora_worker_tests:make_2band_u16(Dir, "persist", 12, 12),
+        Out = filename:join(Dir, "persist_"
+                ++ integer_to_list(erlang:unique_integer([positive])) ++ ".tif"),
+        Req = #{op => ndvi,
+                sources => [#{uri => list_to_binary(Scene), 'band' => 1},
+                            #{uri => list_to_binary(Scene), 'band' => 2}],
+                out_uri => list_to_binary("file://" ++ Out),
+                tile => {4, 4}},
+        {ok, JobId} = velora_job_manager:submit(Req),
+        ok = poll_done(JobId, 60),
+        ok = application:stop(velora),                 %% flush + close the store
+        {ok, _} = application:ensure_all_started(velora),
+        Status = velora_job_manager:status(JobId),     %% reloaded from disk
+        ?assertMatch(#{status := done}, Status),
+        #{stats := Stats} = Status,
+        ?assertEqual(12 * 12, maps:get(count, Stats))
+    after
+        _ = application:stop(velora)
+    end.
 
 %% Similarity search survives losing the coordinator: after an app restart the
 %% index is rebuilt from the persisted per-tile vectors.
@@ -125,27 +146,32 @@ knn_persistence_test_() ->
         end
     end}.
 
+%% See the comment on do_persist/0: the body runs under try/after so a failed
+%% assertion here can never leak the running application into later suites.
 do_knn_persist() ->
     {ok, _} = application:ensure_all_started(velora),
-    Dir = velora_worker_tests:tmp_dir(),
-    Scene = velora_worker_tests:make_2band_u16(Dir, "knn", 16, 16),
-    Out = filename:join(Dir, "knn_"
-            ++ integer_to_list(erlang:unique_integer([positive])) ++ ".tif"),
-    Req = #{op => ndvi,
-            sources => [#{uri => list_to_binary(Scene), 'band' => 1},
-                        #{uri => list_to_binary(Scene), 'band' => 2}],
-            out_uri => list_to_binary("file://" ++ Out),
-            tile => {8, 8}},
-    {ok, JobId} = velora_job_manager:submit(Req),
-    ok = poll_done(JobId, 60),
-    %% live search (coordinator still alive)
-    ?assertMatch({ok, [_ | _]}, velora_job_manager:search(JobId, {tile, <<"0_0">>}, 4)),
-    %% restart the app -> coordinator gone -> search from persisted vectors
-    ok = application:stop(velora),
-    {ok, _} = application:ensure_all_started(velora),
-    R2 = velora_job_manager:search(JobId, {tile, <<"0_0">>}, 4),
-    _ = application:stop(velora),
-    ?assertMatch({ok, [_ | _]}, R2).
+    try
+        Dir = velora_worker_tests:tmp_dir(),
+        Scene = velora_worker_tests:make_2band_u16(Dir, "knn", 16, 16),
+        Out = filename:join(Dir, "knn_"
+                ++ integer_to_list(erlang:unique_integer([positive])) ++ ".tif"),
+        Req = #{op => ndvi,
+                sources => [#{uri => list_to_binary(Scene), 'band' => 1},
+                            #{uri => list_to_binary(Scene), 'band' => 2}],
+                out_uri => list_to_binary("file://" ++ Out),
+                tile => {8, 8}},
+        {ok, JobId} = velora_job_manager:submit(Req),
+        ok = poll_done(JobId, 60),
+        %% live search (coordinator still alive)
+        ?assertMatch({ok, [_ | _]}, velora_job_manager:search(JobId, {tile, <<"0_0">>}, 4)),
+        %% restart the app -> coordinator gone -> search from persisted vectors
+        ok = application:stop(velora),
+        {ok, _} = application:ensure_all_started(velora),
+        R2 = velora_job_manager:search(JobId, {tile, <<"0_0">>}, 4),
+        ?assertMatch({ok, [_ | _]}, R2)
+    after
+        _ = application:stop(velora)
+    end.
 
 poll_done(_JobId, 0) -> {error, timeout};
 poll_done(JobId, N) ->

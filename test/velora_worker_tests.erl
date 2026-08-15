@@ -64,6 +64,20 @@ make_2band_u16(Dir, Name, W, H) ->
                   [{args, ["-q", "-a_srs", "EPSG:4326", "-a_ullr", "0", "8", "8", "0",
                            "-of", "GTiff", Raw, Tif]}, binary, exit_status, in]),
     ok = wait(P),
+    %% gdal_translate's exit_status(0) means the writing process is done, but a
+    %% separate `gdalinfo' subprocess spawned moments later (by a worker
+    %% reading this same file, or by our own gdal_available/0 probes elsewhere
+    %% in the suite) has intermittently failed to parse a just-closed file on
+    %% this platform -- observed as `{gdalinfo_parse, Path}' downstream. Rather
+    %% than trust the exit code alone, confirm the file is actually readable
+    %% by a fresh GDAL process before handing it back, polling instead of a
+    %% fixed sleep so this only costs time on the rare occasions it's needed.
+    ok = velora_test_util:wait_until(
+           fun() -> case velora_storage:scene_meta(Tif) of
+                        {ok, _} -> ok;
+                        _       -> false
+                    end
+           end, 5000),
     Tif.
 
 %% Portable temp dir: TMP (Windows), TMPDIR (POSIX), then /tmp.

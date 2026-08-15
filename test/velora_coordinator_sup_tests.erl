@@ -13,9 +13,11 @@ isolation_test() ->
         {ok, C1} = velora_coordinator_sup:start_coordinator(Arg),
         ?assert(is_process_alive(C1)),
 
-        %% kill it hard; the supervisor survives and does not restart it
+        %% kill it hard; the supervisor survives and does not restart it. Wait
+        %% for the kill to actually take effect (exit/2 is async) instead of a
+        %% fixed sleep before checking is_process_alive/1.
         exit(C1, kill),
-        timer:sleep(60),
+        _ = velora_test_util:wait_until(fun() -> not is_process_alive(C1) end, 2000),
         ?assert(is_process_alive(Sup)),
         ?assertNot(is_process_alive(C1)),
 

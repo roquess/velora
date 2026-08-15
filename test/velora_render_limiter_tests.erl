@@ -30,8 +30,10 @@ frees_on_holder_death_test_() -> {setup, fun setup/0, fun cleanup/1, fun(_) ->
              fun() -> Parent ! in, receive never -> ok end end) end),
     receive in -> ok end,
     exit(Pid, kill),                 %% holder dies mid-slot
-    timer:sleep(50),
-    %% slot must have been reclaimed
+    %% wait for the DOWN handler to reclaim the token instead of a fixed
+    %% sleep -- the slot must have been reclaimed before we proceed.
+    _ = velora_test_util:wait_until(
+          fun() -> velora_render_limiter:in_flight() =:= 0 end, 2000),
     ?_assertEqual(ok, velora_render_limiter:with_slot(fun() -> ok end))
     end}.
 
