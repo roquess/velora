@@ -15,28 +15,25 @@ init(Req0, State) ->
             {ok, json(Req0, 405, #{error => <<"method_not_allowed">>}), State}
     end.
 
-%% @doc Parse an em_filter-style JSON query and return a results list.
+%% @doc Parse an em_filter-style JSON query and return a results list. Routes an
+%% optional "intent" (tiles|ndvi|info, default tiles) through velora_agent, which
+%% resolves a raster URI directly or geocodes a place and finds a Sentinel-2 scene.
 -spec handle_query(binary()) -> [map()].
 handle_query(Body) ->
     try
         M = jsx:decode(Body, [return_maps]),
-        case uri_of(M) of
-            undefined -> [];
-            Uri ->
-                case velora_web:prepare(Uri) of
-                    {ok, Id, Bounds, NZ} ->
-                        [#{type => <<"raster">>, id => Id, bounds => Bounds,
-                           maxNativeZoom => NZ,
-                           tiles => <<"/tiles/", Id/binary, "/{z}/{x}/{y}">>}];
-                    {error, _} -> []
-                end
-        end
+        Query = query_of(M),
+        Intent = intent_of(M),
+        velora_agent:handle(#{intent => Intent, query => Query})
     catch _:_ -> [] end.
 
-uri_of(#{<<"uri">> := U}) when is_binary(U) -> U;
-uri_of(#{<<"query">> := Q}) when is_binary(Q) ->
-    case binary:match(Q, <<"://">>) of nomatch -> undefined; _ -> Q end;
-uri_of(_) -> undefined.
+query_of(#{<<"query">> := Q}) when is_binary(Q) -> Q;
+query_of(#{<<"uri">> := U}) when is_binary(U) -> U;
+query_of(_) -> <<>>.
+
+intent_of(#{<<"intent">> := <<"ndvi">>}) -> ndvi;
+intent_of(#{<<"intent">> := <<"info">>}) -> info;
+intent_of(_) -> tiles.
 
 json(Req, Code, Map) ->
     cowboy_req:reply(Code, #{<<"content-type">> => <<"application/json">>},

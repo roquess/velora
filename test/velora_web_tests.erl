@@ -77,13 +77,29 @@ do_agent_query() ->
     velora_storage:ensure_gdal_env(),
     Dir = velora_worker_tests:tmp_dir(),
     Scene = velora_worker_tests:make_2band_u16(Dir, "agentscene", 16, 16),
-    Body = jsx:encode(#{uri => list_to_binary(Scene)}),
+    %% velora_agent classifies a query as a raster URI only when it carries a
+    %% scheme ("://"); a bare filesystem path is otherwise treated as a place.
+    Uri = <<"file://", (list_to_binary(Scene))/binary>>,
+    Body = jsx:encode(#{uri => Uri}),
     [R] = velora_agent_h:handle_query(Body),
     ?assertEqual(<<"raster">>, maps:get(type, R)),
     ?assert(is_binary(maps:get(id, R))),
     ?assertMatch([[_, _], [_, _]], maps:get(bounds, R)),
     %% a query without a source URI answers with no results
     ?assertEqual([], velora_agent_h:handle_query(jsx:encode(#{query => <<"hello world">>}))).
+
+%% intent routing: a URI query resolves regardless of a network error being
+%% possible downstream; an empty query (with or without an explicit intent)
+%% always answers with no results.
+agent_query_intent_test() ->
+    R1 = velora_agent_h:handle_query(
+           jsx:encode(#{<<"query">> => <<"https://example.invalid/x.tif">>})),
+    ?assert(is_list(R1)),
+    R2 = velora_agent_h:handle_query(jsx:encode(#{<<"query">> => <<>>})),
+    ?assertEqual([], R2),
+    R3 = velora_agent_h:handle_query(
+           jsx:encode(#{<<"query">> => <<>>, <<"intent">> => <<"ndvi">>})),
+    ?assertEqual([], R3).
 
 %% ---- work-dir sweep ----
 
