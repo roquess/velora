@@ -15,11 +15,27 @@ cmd(Name, Args) -> run(exe(Name), Args).
 to_vsi(Uri) when is_binary(Uri) -> to_vsi(binary_to_list(Uri));
 to_vsi("s3://" ++ Rest)   -> "/vsis3/" ++ Rest;
 to_vsi("gs://" ++ Rest)   -> "/vsigs/" ++ Rest;
-to_vsi("work://" ++ Rest) -> filename:join(velora_config:work_dir(), Rest);
+to_vsi("work://" ++ Rest)  -> filename:join(velora_config:work_dir(), Rest);
+to_vsi("asset://" ++ Rest) -> asset_path(Rest);
 to_vsi("http://" ++ _ = U)  -> "/vsicurl/" ++ U;
 to_vsi("https://" ++ _ = U) -> "/vsicurl/" ++ U;
 to_vsi("file://" ++ Rest) -> Rest;
-to_vsi(Path)              -> Path.
+to_vsi(Path)               -> Path.
+
+%% @doc Resolve an `asset://' URI to a local file under the bundled web assets
+%% (priv/www/assets). Local-only by construction — it can never reach the
+%% network — and any `..' components are dropped so it cannot escape the assets
+%% dir. This lets the viewer render its own bundled sample without an http
+%% self-fetch that the SSRF scheme allowlist (rightly) forbids.
+-spec asset_path(string()) -> string().
+asset_path(Rest) ->
+    Priv = case code:priv_dir(velora) of
+               {error, _} -> "priv";
+               P -> P
+           end,
+    Base = filename:join([Priv, "www", "assets"]),
+    Safe = [C || C <- filename:split(Rest), C =/= "..", C =/= "/", C =/= "."],
+    filename:join([Base | Safe]).
 
 -spec tile_ullr({float(),float(),float(),float(),float(),float()},
                 rast_tiling:tile()) ->

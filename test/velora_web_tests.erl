@@ -415,3 +415,17 @@ with_tile_disk_cache_enabled(Fun) ->
     application:set_env(velora, tile_disk_cache, true),
     try Fun()
     after application:unset_env(velora, tile_disk_cache) end.
+
+%% The bundled sample renders via the local-only `asset://' scheme (no http
+%% self-fetch), which the default scheme allowlist permits. Regression guard for
+%% the viewer-e2e default-sample path under SSRF hardening.
+prepare_asset_sample_test_() ->
+    {timeout, 60, fun() ->
+        case gdal_available() of
+            false -> ok;
+            true  ->
+                application:unset_env(velora, allowed_schemes),
+                ?assertMatch({ok, _Id, [[_, _], [_, _]], _NZ},
+                             velora_web:prepare(<<"asset://samples/carina.jpg">>))
+        end
+    end}.

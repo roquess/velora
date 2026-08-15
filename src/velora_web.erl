@@ -337,7 +337,7 @@ scheme(Uri0) ->
 allowed(Uri) ->
     L = case application:get_env(velora, allowed_schemes) of
             {ok, LL} when is_list(LL) -> LL;
-            _ -> [<<"https">>, <<"s3">>, <<"gs">>, <<"work">>]
+            _ -> [<<"https">>, <<"s3">>, <<"gs">>, <<"work">>, <<"asset">>]
         end,
     lists:member(scheme(Uri), [to_bin(X) || X <- L]).
 
