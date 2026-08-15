@@ -179,12 +179,17 @@ do_prepare_tile() ->
     ?assertMatch(<<137, 80, 78, 71, _/binary>>, Png).
 
 %% A rendered tile is cached to disk; a repeat request is served from the cache
-%% (same bytes, file not re-rendered).
+%% (same bytes, file not re-rendered). When the memory cache (velora_cache) is
+%% available, `tile/4' serves hits from memory instead of touching disk at
+%% all, so this test forces the `tile_disk_cache' L2 flag on to exercise the
+%% disk-write path explicitly regardless of NIF availability; when the memory
+%% cache NIF is absent, `tile/4' falls back unconditionally to this same disk
+%% path (see `tile_memory_hit_test_' for the memory-cache-available case).
 tile_cache_test_() ->
     {timeout, 60, fun() ->
         case gdal_available() of
             false -> ?debugMsg("GDAL not available, skipping"), ok;
-            true  -> do_tile_cache()
+            true  -> with_tile_disk_cache_enabled(fun do_tile_cache/0)
         end
     end}.
 
@@ -208,6 +213,57 @@ do_tile_cache() ->
     {ok, P2} = velora_web:tile(Id, Z, X, Y),          %% cache hit
     ?assertEqual(P1, P2),
     ?assertEqual(Mt1, filelib:last_modified(Cache)).  %% not re-rendered
+
+%% A rendered tile is served from the in-memory `velora_cache' on a repeat
+%% request: the render seam (`velora_web:render_count/0') stays at 1 instead
+%% of incrementing to 2, proving the second `tile/4' call never re-spawns
+%% GDAL. Skips cleanly when the velora_cache NIF isn't loaded for this
+%% platform/build (in that case `tile/4' falls back to the disk cache
+%% exercised by `tile_cache_test_' above).
+tile_memory_hit_test_() ->
+    {timeout, 60, fun() ->
+        case velora_web:tiles_cache() =:= unavailable of
+            true  -> ?debugMsg("velora_cache NIF not loaded, skipping"), ok;
+            false ->
+                case gdal_available() of
+                    false -> ?debugMsg("GDAL not available, skipping"), ok;
+                    true  -> do_tile_memory_hit()
+                end
+        end
+    end}.
+
+do_tile_memory_hit() ->
+    velora_storage:ensure_gdal_env(),
+    Dir = velora_worker_tests:tmp_dir(),
+    Scene = velora_worker_tests:make_2band_u16(Dir, "memcachescene", 16, 16),
+    {ok, Id, [[S, W], [N, E]], _} =
+        with_file_scheme_allowed(fun() -> velora_web:prepare(list_to_binary(Scene)) end),
+    Z = 4,
+    {X, Y} = lonlat_to_xy((W + E) / 2, (S + N) / 2, Z),
+    velora_web:reset_render_count(),
+    {ok, P1} = velora_web:tile(Id, Z, X, Y),          %% memory miss: renders
+    ?assertMatch(<<137, 80, 78, 71, _/binary>>, P1),
+    ?assertEqual(1, velora_web:render_count()),
+    {ok, P2} = velora_web:tile(Id, Z, X, Y),          %% memory hit: no render
+    ?assertEqual(P1, P2),
+    ?assertEqual(1, velora_web:render_count()).
+
+%% ---- tile cache key ----
+
+%% Different {Id,Z,X,Y} coordinates never collide; identical coordinates
+%% always produce the identical key.
+tile_cache_key_distinct_test() ->
+    K1 = velora_web:tile_key(<<"abc">>, 4, 1, 2),
+    K2 = velora_web:tile_key(<<"abc">>, 4, 1, 2),
+    ?assertEqual(K1, K2),
+    Variants = [
+        velora_web:tile_key(<<"xyz">>, 4, 1, 2),   %% different id
+        velora_web:tile_key(<<"abc">>, 5, 1, 2),   %% different z
+        velora_web:tile_key(<<"abc">>, 4, 2, 2),   %% different x
+        velora_web:tile_key(<<"abc">>, 4, 1, 3)    %% different y
+    ],
+    ?assertEqual(4, length(lists:usort(Variants))),
+    ?assertNot(lists:member(K1, Variants)).
 
 %% ---- NDVI + info for the emergence agent ----
 
@@ -265,3 +321,12 @@ with_file_scheme_allowed(Fun) ->
     application:set_env(velora, allowed_schemes, [file, https, s3, gs, work]),
     try Fun()
     after application:unset_env(velora, allowed_schemes) end.
+
+%% Force the disk L2 on for the duration of `Fun', to exercise
+%% `velora_web:tile/4''s disk-write path even when the memory cache is
+%% available (the product default, `tile_disk_cache => false', is untouched
+%% outside the fun).
+with_tile_disk_cache_enabled(Fun) ->
+    application:set_env(velora, tile_disk_cache, true),
+    try Fun()
+    after application:unset_env(velora, tile_disk_cache) end.

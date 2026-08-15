@@ -8,12 +8,14 @@
 -export([prepare/1, tile/4, source_path/1, sweep/1, info/1, prepare_ndvi/2]).
 %% exported for unit tests
 -export([bbox_3857/3, fake_extent/2, jdecode/1, native_zoom/1, scheme/1, allowed/1,
-         source_size_ok/2]).
+         source_size_ok/2, tile_key/4, tiles_cache/0, render_count/0, reset_render_count/0]).
 
 -include_lib("kernel/include/file.hrl").
 
 -define(SHIFT, 20037508.342789244).   %% half the web-mercator world extent (m)
 -define(NDVI_MAX_DIM, 1024).          %% cap the NDVI working grid's larger axis
+-define(TILES_CACHE_STATE, {?MODULE, tiles_cache_state}). %% persistent_term key
+-define(RENDER_COUNT, {?MODULE, render_count}).            %% persistent_term key
 
 %% @doc Ingest a source URI to a local web-mercator COG; returns an id, lat/lon
 %% bounds [[S,W],[N,E]], and the data's native web-mercator zoom (so the client
@@ -94,6 +96,10 @@ native_zoom(Path) ->
     end.
 
 %% @doc Cut one XYZ tile (z/x/y) from the prepared COG as a 256x256 PNG binary.
+%% Memory-first: a bounded `velora_cache' instance (`tiles', 2Q eviction) sits
+%% in front of GDAL, keyed on `{Id,Z,X,Y}'. When the cache NIF is unavailable
+%% on this platform/build, this degrades to the original on-disk `tc/' cache
+%% so tiles are still deduplicated across requests. See `tiles_cache/0'.
 -spec tile(binary(), integer(), integer(), integer()) ->
         {ok, binary()} | {error, term()}.
 tile(Id, Z, X, Y) ->
@@ -101,34 +107,135 @@ tile(Id, Z, X, Y) ->
     case filelib:is_regular(Src) of
         false -> {error, not_found};
         true  ->
-            %% tiles are deterministic per (id,z,x,y); serve from the on-disk
-            %% cache to skip GDAL entirely on repeat views and across clients
-            Cache = cache_path(Id, Z, X, Y),
-            case file:read_file(Cache) of
-                {ok, Bin} -> {ok, Bin};
-                _         -> render_tile(Src, Z, X, Y, Cache)
+            case tiles_cache() of
+                {ok, tiles} -> tile_memory(Id, Src, Z, X, Y);
+                unavailable -> tile_disk(Id, Src, Z, X, Y)
             end
     end.
+
+%% Memory-cache path: hit serves straight from `velora_cache' (no disk, no
+%% GDAL); miss renders, populates the memory cache, and optionally also
+%% writes the disk L2 (`tile_disk_cache' app env, default false).
+tile_memory(Id, Src, Z, X, Y) ->
+    Key = tile_key(Id, Z, X, Y),
+    case velora_cache:get(tiles, Key) of
+        {ok, Bin} -> {ok, Bin};
+        miss ->
+            case render_tile_bin(Src, Z, X, Y) of
+                {ok, Bin} ->
+                    ok = velora_cache:put(tiles, Key, Bin),
+                    _ = maybe_write_disk_l2(Id, Z, X, Y, Bin),
+                    {ok, Bin};
+                {error, _} = Err -> Err
+            end
+    end.
+
+%% Disk-cache fallback path (memory cache NIF unavailable): the original
+%% behavior, unconditional on `tile_disk_cache'.
+tile_disk(Id, Src, Z, X, Y) ->
+    Cache = cache_path(Id, Z, X, Y),
+    case file:read_file(Cache) of
+        {ok, Bin} -> {ok, Bin};
+        _ ->
+            case render_tile_bin(Src, Z, X, Y) of
+                {ok, Bin} ->
+                    ok = write_disk_cache(Cache, Bin),
+                    {ok, Bin};
+                {error, _} = Err -> Err
+            end
+    end.
+
+maybe_write_disk_l2(Id, Z, X, Y, Bin) ->
+    case application:get_env(velora, tile_disk_cache, false) of
+        true  -> write_disk_cache(cache_path(Id, Z, X, Y), Bin);
+        false -> ok
+    end.
+
+write_disk_cache(Cache, Bin) ->
+    ok = filelib:ensure_dir(Cache),
+    file:write_file(Cache, Bin).
+
+%% @doc Whether the in-memory tile cache is usable. Lazily creates the named
+%% `velora_cache' instance `tiles' on first use and memoizes the outcome in a
+%% `persistent_term' so a NIF-absent platform (no prebuilt `velora_cache' NIF
+%% for this OS/arch, or a cargo-less build) is only probed once, not retried
+%% on every tile request. Capacity from app env `tile_cache_entries' (default
+%% 2048), policy `twoq' (scan-resistant, so panning a large scene does not
+%% evict the hot centre).
+-spec tiles_cache() -> {ok, tiles} | unavailable.
+tiles_cache() ->
+    case persistent_term:get(?TILES_CACHE_STATE, undefined) of
+        undefined ->
+            State = init_tiles_cache(),
+            persistent_term:put(?TILES_CACHE_STATE, State),
+            State;
+        State -> State
+    end.
+
+init_tiles_cache() ->
+    Cap = application:get_env(velora, tile_cache_entries, 2048),
+    try velora_cache:new(tiles, #{capacity => Cap, policy => twoq}) of
+        ok             -> {ok, tiles};
+        {error, _}     -> unavailable
+    catch
+        _:_ -> unavailable
+    end.
+
+%% @doc Canonical binary cache key for one `{Id,Z,X,Y}' tile coordinate.
+-spec tile_key(binary() | string(), integer(), integer(), integer()) -> binary().
+tile_key(Id, Z, X, Y) ->
+    iolist_to_binary([to_list(Id), "/", integer_to_list(Z), "/",
+                       integer_to_list(X), "/", integer_to_list(Y)]).
 
 cache_path(Id, Z, X, Y) ->
     Name = to_list(Id) ++ "_" ++ integer_to_list(Z) ++ "_"
            ++ integer_to_list(X) ++ "_" ++ integer_to_list(Y) ++ ".png",
     filename:join([velora_config:work_dir(), "tc", Name]).
 
-render_tile(Src, Z, X, Y, Cache) ->
-    ok = filelib:ensure_dir(Cache),
+%% @doc Render one tile from the prepared COG to a PNG binary (GDAL work
+%% only; does not touch the disk cache). Bumps a `persistent_term' render
+%% counter (test seam: lets tests observe a memory-cache hit by asserting
+%% this does NOT increment, without GDAL spawns being the only signal).
+render_tile_bin(Src, Z, X, Y) ->
+    bump_render_count(),
+    Tmp = filename:join([velora_config:work_dir(), "tc",
+             "tmp_" ++ integer_to_list(erlang:unique_integer([positive])) ++ ".png"]),
+    ok = filelib:ensure_dir(Tmp),
     {Ulx, Uly, Lrx, Lry} = bbox_3857(Z, X, Y),
     case velora_storage:cmd("gdal_translate",
              ["-q", "-of", "PNG", "-outsize", "256", "256",
               "-projwin_srs", "EPSG:3857",
-              "-projwin", f(Ulx), f(Uly), f(Lrx), f(Lry), Src, Cache]) of
+              "-projwin", f(Ulx), f(Uly), f(Lrx), f(Lry), Src, Tmp]) of
         {ok, _} ->
-            _ = file:delete(Cache ++ ".aux.xml"),
-            file:read_file(Cache);
+            _ = file:delete(Tmp ++ ".aux.xml"),
+            R = file:read_file(Tmp),
+            _ = file:delete(Tmp),
+            R;
         {error, E} ->
-            _ = file:delete(Cache),   %% e.g. tile fully outside data
-            {error, E}
+            _ = file:delete(Tmp),
+            _ = file:delete(Tmp ++ ".aux.xml"),
+            {error, E}   %% e.g. tile fully outside data
     end.
+
+bump_render_count() ->
+    N = case persistent_term:get(?RENDER_COUNT, undefined) of
+            undefined -> 0;
+            V         -> V
+        end,
+    persistent_term:put(?RENDER_COUNT, N + 1).
+
+%% @doc Current value of the render-count test seam (see `render_tile_bin/4').
+-spec render_count() -> non_neg_integer().
+render_count() ->
+    case persistent_term:get(?RENDER_COUNT, undefined) of
+        undefined -> 0;
+        V         -> V
+    end.
+
+%% @doc Reset the render-count test seam to 0.
+-spec reset_render_count() -> ok.
+reset_render_count() ->
+    persistent_term:put(?RENDER_COUNT, 0).
 
 to_list(B) when is_binary(B) -> binary_to_list(B);
 to_list(L) -> L.
