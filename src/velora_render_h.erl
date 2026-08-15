@@ -14,6 +14,8 @@ init(Req0, State) ->
                         {ok, Id, Bounds, MaxNativeZoom} ->
                             {ok, json(Req1, 200, #{id => Id, bounds => Bounds,
                                                    maxNativeZoom => MaxNativeZoom}), State};
+                        {error, overloaded} ->
+                            {ok, json(Req1, 503, #{error => <<"overloaded">>}), State};
                         {error, R} ->
                             {ok, json(Req1, 400, #{error => errbin(R)}), State}
                     end;

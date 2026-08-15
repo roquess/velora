@@ -20,6 +20,8 @@ init([]) ->
           type => supervisor},
         #{id => velora_job_manager,
           start => {velora_job_manager, start_link, []}},
+        #{id => velora_render_limiter,
+          start => {velora_render_limiter, start_link, []}},
         velora_api:child_spec(),
         #{id => velora_discovery, start => {velora_discovery, start_link, []}},
         #{id => velora_janitor, start => {velora_janitor, start_link, []}},

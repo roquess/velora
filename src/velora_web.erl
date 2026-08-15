@@ -22,7 +22,7 @@
 prepare(Uri) ->
     case allowed(Uri) of
         false -> {error, {scheme_not_allowed, scheme(Uri)}};
-        true  -> prepare_1(Uri)
+        true  -> velora_render_limiter:with_slot(fun() -> prepare_1(Uri) end)
     end.
 
 prepare_1(Uri) ->
@@ -236,7 +236,7 @@ info_1(Uri) ->
 prepare_ndvi(RedUri, NirUri) ->
     case allowed(RedUri) andalso allowed(NirUri) of
         false -> {error, {scheme_not_allowed, scheme(RedUri)}};
-        true  -> prepare_ndvi_1(RedUri, NirUri)
+        true  -> velora_render_limiter:with_slot(fun() -> prepare_ndvi_1(RedUri, NirUri) end)
     end.
 
 prepare_ndvi_1(RedUri, NirUri) ->
