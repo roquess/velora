@@ -63,6 +63,15 @@ allowed_restricted_test() ->
         ?assert(velora_web:allowed(<<"s3://b/k.tif">>))
     after application:unset_env(velora, allowed_schemes) end.
 
+info_scheme_gate_test() ->
+    application:set_env(velora, allowed_schemes, [https]),
+    try
+        ?assertMatch({error, {scheme_not_allowed, _}},
+                     velora_web:info(<<"file:///etc/hosts">>))
+    after
+        application:unset_env(velora, allowed_schemes)
+    end.
+
 %% ---- emergence agent query ----
 
 agent_query_test_() ->

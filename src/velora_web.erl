@@ -202,6 +202,12 @@ raw_info(Vsi) ->
 %% Used by the emergence agent to answer an `info' intent.
 -spec info(binary() | string()) -> {ok, map()} | {error, term()}.
 info(Uri) ->
+    case allowed(Uri) of
+        false -> {error, {scheme_not_allowed, scheme(Uri)}};
+        true  -> info_1(Uri)
+    end.
+
+info_1(Uri) ->
     In = velora_storage:to_vsi(Uri),
     case velora_storage:cmd("gdalinfo", ["-json", In]) of
         {ok, Out} ->
