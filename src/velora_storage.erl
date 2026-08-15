@@ -3,7 +3,7 @@
 -module(velora_storage).
 
 -export([to_vsi/1, tile_ullr/2, scene_meta/1, write_tile/6, assemble/2,
-         ensure_gdal_env/0, cmd/2]).
+         ensure_gdal_env/0, cmd/2, gdal_env/0]).
 
 %% @doc Run a GDAL CLI tool by name with args; {ok, Output} | {error, Reason}.
 -spec cmd(string(), [string()]) -> {ok, binary()} | {error, term()}.
@@ -125,11 +125,17 @@ run(Exe, Args) ->
 %% GDAL/PROJ need to be pointed at their support data directories explicitly:
 %% the installer does not always register PROJ_LIB/PROJ_DATA/GDAL_DATA, and
 %% without them `gdal_translate -a_srs' fails with "Cannot find proj.db".
+-spec gdal_env() -> [{string(), string()}].
 gdal_env() ->
     %% GeoTIFF/COG output needs seekable (w+b) writes, which /vsis3 rejects
     %% directly; this makes GDAL buffer to a local temp file and upload on close,
     %% so writing tiles and the assembled COG straight to object storage works.
-    Base = [{"CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE", "YES"}],
+    %% The HTTP_* keys bound remote /vsicurl//vsis3 fetches so a hanging or
+    %% slow-drip remote source can't block a GDAL child forever.
+    Base = [{"CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE", "YES"},
+            {"GDAL_HTTP_TIMEOUT", "30"},
+            {"GDAL_HTTP_CONNECTTIMEOUT", "15"},
+            {"GDAL_HTTP_MAX_RETRY", "2"}],
     case gdal_dir() of
         "" -> Base;
         Dir ->

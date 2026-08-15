@@ -47,3 +47,9 @@ work_uri_test() ->
     Dir = velora_config:work_dir(),
     ?assertEqual(filename:join(Dir, "a.tif"),
                  velora_storage:to_vsi(<<"work://a.tif">>)).
+
+gdal_env_has_timeouts_test() ->
+    Env = velora_storage:gdal_env(),
+    Keys = [K || {K, _} <- Env],
+    ?assert(lists:member("GDAL_HTTP_TIMEOUT", Keys)),
+    ?assert(lists:member("GDAL_HTTP_CONNECTTIMEOUT", Keys)).

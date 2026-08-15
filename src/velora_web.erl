@@ -7,7 +7,8 @@
 -module(velora_web).
 -export([prepare/1, tile/4, source_path/1, sweep/1, info/1, prepare_ndvi/2]).
 %% exported for unit tests
--export([bbox_3857/3, fake_extent/2, jdecode/1, native_zoom/1, scheme/1, allowed/1]).
+-export([bbox_3857/3, fake_extent/2, jdecode/1, native_zoom/1, scheme/1, allowed/1,
+         source_size_ok/2]).
 
 -include_lib("kernel/include/file.hrl").
 
@@ -29,34 +30,53 @@ prepare_1(Uri) ->
     Vsi = velora_storage:to_vsi(Uri),
     case raw_info(Vsi) of
         {ok, M} ->
-            Id   = integer_to_list(erlang:unique_integer([positive])),
-            NB   = length(maps:get(<<"bands">>, M, [])),
-            Warp = filename:join(velora_config:work_dir(), "web_" ++ Id ++ "_3857.tif"),
-            Out  = source_path(Id),
-            %% non-georeferenced images get a valid near-equator extent first
-            {Src, Vrt} = case has_crs(M) of
-                             true  -> {Vsi, undefined};
-                             false -> V = geo_vrt(M, Vsi, Id), {V, V}
-                         end,
-            R = case velora_storage:cmd("gdalwarp",
-                         ["-q", "-t_srs", "EPSG:3857", "-r", "bilinear",
-                          "-of", "GTiff", Src, Warp]) of
-                    {ok, _} ->
-                        case velora_storage:cmd("gdal_translate",
-                                 ["-q", "-of", "COG", "-ot", "Byte", "-scale"]
-                                 ++ band_args(NB) ++ [Warp, Out]) of
-                            {ok, _}    -> bounds(Out);
-                            {error, E} -> {error, {translate, E}}
-                        end;
-                    {error, E} -> {error, {warp, E}}
-                end,
-            _ = file:delete(Warp),
-            _ = case Vrt of undefined -> ok; _ -> file:delete(Vrt) end,
-            case R of
-                {ok, B} -> {ok, list_to_binary(Id), B, native_zoom(Out)};
-                Err     -> Err
+            MaxMP = application:get_env(velora, max_source_megapixels, 500),
+            case source_size_ok(M, MaxMP) of
+                {error, _} = TooBig -> TooBig;
+                ok -> prepare_2(Vsi, M)
             end;
         _ -> {error, unreadable}
+    end.
+
+prepare_2(Vsi, M) ->
+    Id   = integer_to_list(erlang:unique_integer([positive])),
+    NB   = length(maps:get(<<"bands">>, M, [])),
+    Warp = filename:join(velora_config:work_dir(), "web_" ++ Id ++ "_3857.tif"),
+    Out  = source_path(Id),
+    %% non-georeferenced images get a valid near-equator extent first
+    {Src, Vrt} = case has_crs(M) of
+                     true  -> {Vsi, undefined};
+                     false -> V = geo_vrt(M, Vsi, Id), {V, V}
+                 end,
+    R = case velora_storage:cmd("gdalwarp",
+                 ["-q", "-t_srs", "EPSG:3857", "-r", "bilinear",
+                  "-of", "GTiff", Src, Warp]) of
+            {ok, _} ->
+                case velora_storage:cmd("gdal_translate",
+                         ["-q", "-of", "COG", "-ot", "Byte", "-scale"]
+                         ++ band_args(NB) ++ [Warp, Out]) of
+                    {ok, _}    -> bounds(Out);
+                    {error, E} -> {error, {translate, E}}
+                end;
+            {error, E} -> {error, {warp, E}}
+        end,
+    _ = file:delete(Warp),
+    _ = case Vrt of undefined -> ok; _ -> file:delete(Vrt) end,
+    case R of
+        {ok, B} -> {ok, list_to_binary(Id), B, native_zoom(Out)};
+        Err     -> Err
+    end.
+
+%% @doc Whether a `gdalinfo -json' metadata map's pixel count is within
+%% `MaxMP' megapixels. Pure and GDAL-free so it's unit-testable in isolation;
+%% a missing/malformed `size' is treated as ok (the caller's downstream GDAL
+%% call will surface the real failure).
+-spec source_size_ok(map(), pos_integer()) -> ok | {error, {source_too_large, non_neg_integer()}}.
+source_size_ok(M, MaxMP) ->
+    case maps:get(<<"size">>, M, [0, 0]) of
+        [W, H] when is_integer(W), is_integer(H), W * H > MaxMP * 1000000 ->
+            {error, {source_too_large, W * H div 1000000}};
+        _ -> ok
     end.
 
 %% Web-mercator zoom at which one COG pixel maps to one screen pixel, from the
@@ -240,6 +260,29 @@ prepare_ndvi(RedUri, NirUri) ->
     end.
 
 prepare_ndvi_1(RedUri, NirUri) ->
+    MaxMP = application:get_env(velora, max_source_megapixels, 500),
+    case ndvi_sources_size_ok(RedUri, NirUri, MaxMP) of
+        {error, _} = TooBig -> TooBig;
+        ok -> prepare_ndvi_2(RedUri, NirUri)
+    end.
+
+%% Both Red and Nir are guarded: warp_capped/1 below reads Red's size via
+%% info/1 for its `-ts' args, but Nir is warped straight onto Red's grid
+%% without ever being sized, so an oversized Nir source would otherwise skip
+%% the cap entirely.
+ndvi_sources_size_ok(RedUri, NirUri, MaxMP) ->
+    case ndvi_source_size_ok(RedUri, MaxMP) of
+        {error, _} = E -> E;
+        ok             -> ndvi_source_size_ok(NirUri, MaxMP)
+    end.
+
+ndvi_source_size_ok(Uri, MaxMP) ->
+    case raw_info(velora_storage:to_vsi(Uri)) of
+        {ok, M} -> source_size_ok(M, MaxMP);
+        _       -> ok   %% unreadable; the warp step below surfaces the real error
+    end.
+
+prepare_ndvi_2(RedUri, NirUri) ->
     Id   = integer_to_list(erlang:unique_integer([positive])),
     Dir  = velora_config:work_dir(),
     RedW = filename:join(Dir, "ndvi_" ++ Id ++ "_red_3857.tif"),

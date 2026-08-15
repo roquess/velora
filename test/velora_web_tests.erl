@@ -41,6 +41,14 @@ jdecode_test() ->
 jdecode_no_json_test() ->
     ?assertError(no_json, velora_web:jdecode(<<"no json here">>)).
 
+%% ---- source-size guard ----
+
+source_size_ok_test() ->
+    ?assertEqual(ok, velora_web:source_size_ok(#{<<"size">> => [1000,1000]}, 500)),
+    ?assertMatch({error, {source_too_large, _}},
+                 velora_web:source_size_ok(#{<<"size">> => [30000,30000]}, 500)),  %% 900 MP
+    ?assertEqual(ok, velora_web:source_size_ok(#{}, 500)).                          %% no size => ok
+
 %% ---- source-scheme restriction ----
 
 scheme_test() ->
