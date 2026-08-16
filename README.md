@@ -9,6 +9,8 @@ histogram) and a per-tile k-NN index you can query for similar regions. Nodes ca
 join or die mid-job: work is reassigned so the result is always complete and
 exactly-once.
 
+![Screenshot](priv/www/assets/screen1.jpg)
+
 [![CI](https://github.com/roquess/velora/actions/workflows/ci.yml/badge.svg)](https://github.com/roquess/velora/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
