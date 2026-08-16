@@ -47,9 +47,13 @@ body {
   margin-bottom: 14px;
 }
 .brand .dot {
-  width: 9px; height: 9px; border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 12px var(--accent);
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background-image: url("/assets/favicon.ico");
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
 }
 
 .filebtn {
