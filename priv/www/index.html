@@ -37,9 +37,11 @@
 
     <div class="sep"><span>or</span></div>
 
-    <input type="text" id="url" class="urlin" placeholder="https:// · s3:// · file:// URL">
+    <input type="text" id="url" class="urlin" placeholder="https:// · s3:// URL — or a place name for NDVI">
     <button id="render" class="render">Render</button>
+    <label class="ndvitoggle" title="Vegetation index: instant preview, then full resolution"><input type="checkbox" id="ndvi"> NDVI</label>
     <div id="status" class="status"></div>
+    <div id="ndvistats" class="ndvistats hidden"></div>
 	<br />
     <div class="samples">
       <button class="chip" data-uri="asset://samples/carina.jpg">🌌 Carina Nebula</button>

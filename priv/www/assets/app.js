@@ -4,6 +4,7 @@
 const $ = (s) => document.querySelector(s);
 const statusEl = $("#status"), renderBtn = $("#render");
 const fileIn = $("#file"), fnameEl = $("#fname"), urlIn = $("#url");
+const ndviIn = $("#ndvi"), ndviStatsEl = $("#ndvistats");
 const overlay = $("#overlay"), ovtext = $("#ovtext"), emptyEl = $("#empty"), appEl = $("#app");
 let map, tiles, homeBounds, busy = false;
 
@@ -73,6 +74,27 @@ async function resolveUri({ file, url }) {
   throw new Error("Choose a local file or enter a URL.");
 }
 
+// Swap the map's tile layer to a new XYZ template. Stops asking past the data's
+// native zoom; Leaflet scales the sharpest tiles (kept crisp by CSS).
+function setTiles(tpl, bounds, nz) {
+  ensureMap();
+  map.setMaxZoom(nz + 8);
+  if (tiles) map.removeLayer(tiles);
+  const b = L.latLngBounds(bounds);
+  tiles = L.tileLayer(tpl, { bounds: b, noWrap: true, maxNativeZoom: nz, maxZoom: nz + 8, tileSize: 256 });
+  tiles.addTo(map);
+  homeBounds = b;
+  fitCover(b);
+  return b;
+}
+
+function showStats(s) {
+  if (!s || typeof s.mean !== "number") { ndviStatsEl.classList.add("hidden"); return; }
+  const f = (x) => (typeof x === "number" ? x.toFixed(3) : x);
+  ndviStatsEl.textContent = `NDVI  mean ${f(s.mean)} · min ${f(s.min)} · max ${f(s.max)}`;
+  ndviStatsEl.classList.remove("hidden");
+}
+
 async function renderSource(src) {
   if (busy) return;
   busy = true;
@@ -80,30 +102,8 @@ async function renderSource(src) {
   emptyEl.classList.add("hidden");
   try {
     const uri = await resolveUri(src);
-    showOverlay("Processing on the server…");
-    setStatus("Processing…");
-    const r = await fetch("/render", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ uri })
-    });
-    if (!r.ok) throw new Error("render failed: " + (await r.text()));
-    const { id, bounds, maxNativeZoom } = await r.json();
-    const nz = maxNativeZoom || 19;
-
-    ensureMap();
-    map.setMaxZoom(nz + 8);
-    if (tiles) map.removeLayer(tiles);
-    const b = L.latLngBounds(bounds);
-    // Stop asking the server for tiles past the data's native zoom; Leaflet just
-    // scales the sharpest tiles (kept crisp by image-rendering: pixelated in CSS).
-    tiles = L.tileLayer("/tiles/" + id + "/{z}/{x}/{y}", {
-      bounds: b, noWrap: true, maxNativeZoom: nz, maxZoom: nz + 8, tileSize: 256
-    });
-    tiles.addTo(map);
-    homeBounds = b;
-    fitCover(b);
-    setStatus("Done.");
+    if (ndviIn && ndviIn.checked) await renderNdvi(uri);
+    else await plainRender(uri);
   } catch (e) {
     setStatus(String(e), true);
     if (!map) emptyEl.classList.remove("hidden");
@@ -112,6 +112,63 @@ async function renderSource(src) {
     renderBtn.disabled = false;
     busy = false;
   }
+}
+
+async function plainRender(uri) {
+  showStats(null);
+  showOverlay("Processing on the server…");
+  setStatus("Processing…");
+  const r = await fetch("/render", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ uri })
+  });
+  if (!r.ok) throw new Error("render failed: " + (await r.text()));
+  const { id, bounds, maxNativeZoom } = await r.json();
+  setTiles("/tiles/" + id + "/{z}/{x}/{y}", bounds, maxNativeZoom || 19);
+  setStatus("Done.");
+}
+
+// NDVI via the agent's async contract: show the instant capped preview, then
+// poll the full-resolution job and swap to its sharper tiles when it is done.
+async function renderNdvi(query) {
+  showStats(null);
+  showOverlay("Computing NDVI on the server…");
+  setStatus("NDVI…");
+  const r = await fetch("/agent/query", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ query, intent: "ndvi" })
+  });
+  if (!r.ok) throw new Error("NDVI failed: " + (await r.text()));
+  const results = (await r.json()).results;
+  const card = results && results[0];
+  if (!card) throw new Error("No NDVI result — a place name needs a geocoder + STAC configured; otherwise pass a raster URL.");
+  const p = card.preview;
+  if (p && p.tiles) { setTiles(p.tiles, p.bounds, p.maxNativeZoom || 19); showStats(p.stats); }
+  if (card.status === "processing" && card.job && card.result_tiles) {
+    setStatus("Preview shown — computing full resolution…");
+    await pollNdviJob(card, p);
+  } else {
+    setStatus("Done.");
+  }
+}
+
+async function pollNdviJob(card, preview) {
+  for (let i = 0; i < 150; i++) {              // ~5 min at 2s intervals
+    await new Promise((res) => setTimeout(res, 2000));
+    let st;
+    try { st = await (await fetch(card.poll)).json(); } catch (_) { continue; }
+    if (st.status === "done") {
+      const bounds = preview && preview.bounds ? preview.bounds : homeBounds;
+      const nz = (preview && preview.maxNativeZoom) || 19;
+      setTiles(card.result_tiles, bounds, nz);
+      setStatus("Done (full resolution).");
+      return;
+    }
+    if (st.status === "error") { setStatus("Full-res NDVI failed; showing preview.", true); return; }
+  }
+  setStatus("Full-res NDVI timed out; showing preview.", true);
 }
 
 // open with the galaxy by default so the viewer isn't an empty black screen
