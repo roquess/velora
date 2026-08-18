@@ -9,20 +9,26 @@
 %%% `velora_web:prepare_ndvi/2'); the client polls `/jobs/:id' and, once done,
 %%% loads `/jobs/:id/tiles/{z}/{x}/{y}'.
 -module(velora_ndvi).
--export([submit/2, result_tile/4]).
+-export([submit/1, result_tile/4]).
 
-%% @doc Submit a full-resolution NDVI job over the Red and Nir sources. Sources
-%% are passed as [Nir, Red] to match `velora_worker:apply_op(ndvi, [Nir, Red])'.
--spec submit(binary() | string(), binary() | string()) ->
+%% @doc Submit a full-resolution NDVI job. The spec is either a single
+%% multi-band source (`{single, Uri, NirBand, RedBand}') or a Red/Nir pair
+%% (`{pair, RedUri, NirUri}'). Sources are ordered [Nir, Red] to match
+%% `velora_worker:apply_op(ndvi, [Nir, Red])'.
+-spec submit({single, binary() | string(), pos_integer(), pos_integer()} |
+             {pair, binary() | string(), binary() | string()}) ->
         {ok, binary()} | {error, term()}.
-submit(RedUri, NirUri) ->
+submit(Spec) ->
     Rid = integer_to_list(erlang:unique_integer([positive])),
     OutUri = list_to_binary("work://ndvi_" ++ Rid ++ ".tif"),
-    Req = #{op => ndvi,
-            sources => [#{uri => to_bin(NirUri), 'band' => 1},
-                        #{uri => to_bin(RedUri), 'band' => 1}],
-            out_uri => OutUri},
+    Req = #{op => ndvi, sources => sources(Spec), out_uri => OutUri},
     velora_job_manager:submit(Req).
+
+sources({single, Uri, NirBand, RedBand}) ->
+    U = to_bin(Uri),
+    [#{uri => U, 'band' => NirBand}, #{uri => U, 'band' => RedBand}];
+sources({pair, RedUri, NirUri}) ->
+    [#{uri => to_bin(NirUri), 'band' => 1}, #{uri => to_bin(RedUri), 'band' => 1}].
 
 %% @doc Serve one XYZ tile of a finished NDVI job's result. `processing' while
 %% the job is still running; `{error, _}' on failure or a missing/remote result.

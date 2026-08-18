@@ -466,3 +466,19 @@ info_bbox_overviews_test_() ->
                 end)
         end
     end}.
+
+%% single multi-band source NDVI (bands 1 vs 2 of the same fixture)
+prepare_ndvi_single_test_() ->
+    {timeout, 60, fun() ->
+        case gdal_available() of
+            false -> ok;
+            true  ->
+                with_file_scheme_allowed(fun() ->
+                    Dir = velora_worker_tests:tmp_dir(),
+                    Scene = velora_worker_tests:make_2band_u16(Dir, "ndvi1src", 16, 16),
+                    B = list_to_binary(Scene),
+                    ?assertMatch({ok, _Id, [[_, _], [_, _]], _NZ, #{mean := _}},
+                                 velora_web:prepare_ndvi(B, 1, 2))
+                end)
+        end
+    end}.

@@ -37,10 +37,10 @@ do(info, Q) ->
     end;
 do(ndvi, Q) ->
     case resolve(ndvi, Q) of
-        {ok, {Red, Nir}} ->
+        {ok, Spec} ->
             case application:get_env(velora, ndvi_fullres, true) of
-                true  -> ndvi_fullres(Red, Nir);
-                _     -> ndvi_preview_only(Red, Nir)
+                true  -> ndvi_fullres(Spec);
+                _     -> ndvi_preview_only(Spec)
             end;
         E -> E
     end;
@@ -49,24 +49,28 @@ do(_, _) -> {error, unknown_intent}.
 %% Instant capped preview + a full-resolution job; the card carries both so the
 %% client shows the preview immediately and swaps to the sharp result once the
 %% job (polled via `/jobs/:id') is done.
-ndvi_fullres(Red, Nir) ->
-    Preview = case velora_web:prepare_ndvi(Red, Nir) of
+ndvi_fullres(Spec) ->
+    Preview = case preview_ndvi(Spec) of
                   {ok, Id, Bounds, NZ, Stats} ->
                       #{id => Id, bounds => Bounds, maxNativeZoom => NZ,
                         stats => Stats,
                         tiles => <<"/tiles/", Id/binary, "/{z}/{x}/{y}">>};
                   _ -> null
               end,
-    case velora_ndvi:submit(Red, Nir) of
+    case velora_ndvi:submit(Spec) of
         {ok, JobId} -> {ok, ndvi_async_card(to_bin(JobId), Preview)};
         E -> E
     end.
 
-ndvi_preview_only(Red, Nir) ->
-    case velora_web:prepare_ndvi(Red, Nir) of
+ndvi_preview_only(Spec) ->
+    case preview_ndvi(Spec) of
         {ok, Id, Bounds, NZ, Stats} -> {ok, ndvi_card(Id, Bounds, NZ, Stats)};
         E -> E
     end.
+
+%% Compute the instant capped preview for either NDVI spec.
+preview_ndvi({single, U, NirBand, RedBand}) -> velora_web:prepare_ndvi(U, NirBand, RedBand);
+preview_ndvi({pair, Red, Nir})               -> velora_web:prepare_ndvi(Red, Nir).
 
 to_bin(B) when is_binary(B) -> B;
 to_bin(I) when is_integer(I) -> integer_to_binary(I);
@@ -77,7 +81,10 @@ to_bin(L) when is_list(L) -> list_to_binary(L).
 resolve(Intent, Q) ->
     case velora_query:classify(Q) of
         unknown -> {error, empty_query};
-        {raster_uri, U} when Intent =:= ndvi -> {ok, {U, U}};
+        {raster_uri, U} when Intent =:= ndvi ->
+            NirBand = application:get_env(velora, ndvi_nir_band, 1),
+            RedBand = application:get_env(velora, ndvi_red_band, 2),
+            {ok, {single, U, NirBand, RedBand}};
         {raster_uri, U} -> {ok, U};
         {place, P} -> resolve_place(Intent, P)
     end.
@@ -93,7 +100,7 @@ resolve_place(Intent, Place) ->
     end.
 
 pick_assets(ndvi, #{red := R, nir := N}) when is_binary(R), is_binary(N) ->
-    {ok, {R, N}};
+    {ok, {pair, R, N}};
 pick_assets(ndvi, _) -> {error, no_ndvi_bands};
 pick_assets(_, #{visual := V}) when is_binary(V) -> {ok, V};
 pick_assets(_, _) -> {error, no_visual_asset}.

@@ -32,7 +32,7 @@ do_fullres() ->
         ?assert(maps:is_key(preview, Card)),
 
         %% 2. direct submit -> wait done -> result served as a mercator PNG tile
-        {ok, JobId} = velora_ndvi:submit(U, U),
+        {ok, JobId} = velora_ndvi:submit({single, U, 1, 2}),
         ok = wait_done(JobId),
         {ok, Path} = velora_job_manager:result_path(JobId),
         Uri = <<"work://", (list_to_binary(filename:basename(Path)))/binary>>,

@@ -5,7 +5,7 @@
 %%% overview level and window the tile covers, so the browser only ever fetches
 %%% the currently-visible tiles and never the whole image.
 -module(velora_web).
--export([prepare/1, tile/4, source_path/1, sweep/1, info/1, prepare_ndvi/2]).
+-export([prepare/1, tile/4, source_path/1, sweep/1, info/1, prepare_ndvi/2, prepare_ndvi/3]).
 %% exported for unit tests
 -export([bbox_3857/3, fake_extent/2, jdecode/1, native_zoom/1, scheme/1, allowed/1,
          source_size_ok/2, tile_key/4, tiles_cache/0, render_count/0, reset_render_count/0,
@@ -499,17 +499,60 @@ prepare_ndvi_2(RedUri, NirUri) ->
     Dir  = velora_config:work_dir(),
     RedW = filename:join(Dir, "ndvi_" ++ Id ++ "_red_3857.tif"),
     NirW = filename:join(Dir, "ndvi_" ++ Id ++ "_nir_3857.tif"),
-    F32  = filename:join(Dir, "ndvi_" ++ Id ++ "_f32.tif"),
-    Out  = source_path(Id),
+    try
+        Grid = warp_capped(RedUri, RedW),
+        ok = warp_to_grid(NirUri, NirW, Grid),
+        {ok, RedBin} = read_band(RedW, 1),
+        {ok, NirBin} = read_band(NirW, 1),
+        {ok, Ndvi}   = rast:ndvi_u16(NirBin, RedBin),
+        finish_ndvi(Id, Grid, Ndvi, [RedW, NirW])
+    catch _:E ->
+        _ = [file:delete(P) || P <- [RedW, NirW]],
+        {error, {prepare_ndvi, E}}
+    end.
+
+%% @doc NDVI from a single multi-band source: Nir and Red are two bands of the
+%% same raster (default bands 1 and 2 via the `ndvi_nir_band'/`ndvi_red_band'
+%% env). The source is warped once; both bands are read from the warped grid.
+-spec prepare_ndvi(binary() | string(), pos_integer(), pos_integer()) ->
+        {ok, binary(), [[float()]], integer(), map()} | {error, term()}.
+prepare_ndvi(Uri, NirBand, RedBand) ->
+    case allowed(Uri) of
+        false -> {error, {scheme_not_allowed, scheme(Uri)}};
+        true  ->
+            velora_render_limiter:with_slot(
+                fun() -> prepare_ndvi_single_1(Uri, NirBand, RedBand) end)
+    end.
+
+prepare_ndvi_single_1(Uri, NirBand, RedBand) ->
+    MaxMP = application:get_env(velora, max_source_megapixels, 500),
+    case ndvi_source_size_ok(Uri, MaxMP) of
+        {error, _} = TooBig -> TooBig;
+        ok -> prepare_ndvi_single_2(Uri, NirBand, RedBand)
+    end.
+
+prepare_ndvi_single_2(Uri, NirBand, RedBand) ->
+    Id   = integer_to_list(erlang:unique_integer([positive])),
+    Dir  = velora_config:work_dir(),
+    Warp = filename:join(Dir, "ndvi_" ++ Id ++ "_src_3857.tif"),
+    try
+        Grid = warp_capped(Uri, Warp),
+        {ok, NirBin} = read_band(Warp, NirBand),
+        {ok, RedBin} = read_band(Warp, RedBand),
+        {ok, Ndvi}   = rast:ndvi_u16(NirBin, RedBin),
+        finish_ndvi(Id, Grid, Ndvi, [Warp])
+    catch _:E ->
+        _ = file:delete(Warp),
+        {error, {prepare_ndvi, E}}
+    end.
+
+%% Shared tail: write the f32 NDVI, translate to a Byte COG laid out like
+%% prepare/1 (NDVI's [-1,1] mapped to 0..255), then clean up the temporaries.
+finish_ndvi(Id, {W, H, Ulx, Uly, Lrx, Lry}, Ndvi, Temps) ->
+    Dir = velora_config:work_dir(),
+    F32 = filename:join(Dir, "ndvi_" ++ Id ++ "_f32.tif"),
+    Out = source_path(Id),
     R = try
-            {W, H, Ulx, Uly, Lrx, Lry} = warp_capped(RedUri, RedW),
-            ok = warp_to_grid(NirUri, NirW, {W, H, Ulx, Uly, Lrx, Lry}),
-            {ok, RedBin} = read_band1(RedW),
-            {ok, NirBin} = read_band1(NirW),
-            {ok, Ndvi}   = rast:ndvi_u16(NirBin, RedBin),
-            %% f32 NDVI GeoTIFF in 3857, then a Byte COG laid out like prepare/1.
-            %% NDVI's known [-1,1] range maps to 0..255 (a fixed, meaningful
-            %% stretch), unlike prepare/1's data-derived auto -scale.
             ok = velora_storage:write_tile(F32, Ndvi, W, H, "EPSG:3857",
                                            {Ulx, Uly, Lrx, Lry}),
             {ok, _} = velora_storage:cmd("gdal_translate",
@@ -518,7 +561,7 @@ prepare_ndvi_2(RedUri, NirUri) ->
             {ok, Bounds} = bounds(Out),
             {ok, Bounds, ndvi_stats(Ndvi)}
         catch _:E -> {error, {prepare_ndvi, E}} end,
-    _ = [file:delete(P) || P <- [RedW, NirW, F32]],
+    _ = [file:delete(P) || P <- [F32 | Temps]],
     case R of
         {ok, B, Stats} -> {ok, list_to_binary(Id), B, native_zoom(Out), Stats};
         Err            -> Err
@@ -566,10 +609,10 @@ grid_of(Path) ->
     [G0, G1, _, G3, _, G5] = maps:get(<<"geoTransform">>, M),
     {W, H, G0, G3, G0 + W * G1, G3 + H * G5}.
 
-%% Read band 1 of a raster as a raw little-endian binary in its native dtype.
-read_band1(Path) ->
+%% Read band N of a raster as a raw little-endian binary in its native dtype.
+read_band(Path, N) ->
     {ok, Hd = #{width := W, height := H}} = rast_gdal:open(Path),
-    R = rast_gdal:read_window(Hd, #{x => 0, y => 0, w => W, h => H}, 1),
+    R = rast_gdal:read_window(Hd, #{x => 0, y => 0, w => W, h => H}, N),
     ok = rast_gdal:close(Hd),
     R.
 
