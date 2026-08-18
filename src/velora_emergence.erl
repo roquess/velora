@@ -35,7 +35,10 @@ start_node(C) ->
     Caps = maps:get(capabilities, C, default_caps()),
     Dim  = maps:get(dim, C, 64),
     Vec  = velora_emergence_vec:from_capabilities(Caps, Dim),
+    %% query_port advertises velora's HTTP /agent/query port so mesh peers can
+    %% route work to it (honoured by em_pop >= 0.3.0; ignored by older nodes).
     Opts = #{port => maps:get(port, C, 9100), vector => Vec,
+             query_port => application:get_env(velora, http_port, 8080),
              gossip_interval => maps:get(gossip_interval, C, 5000)},
     try em_pop:start_link(Opts) of
         {ok, Node} ->
