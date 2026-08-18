@@ -16,6 +16,11 @@ init(Req, info) ->
              jobs => #{total => length(Jobs), running => Count(running),
                        done => Count(done), error => Count(error)}},
     {ok, reply(Req, 200, Info), info};
+init(Req, metrics) ->
+    case application:get_env(velora, metrics_enabled, true) of
+        true -> {ok, reply(Req, 200, velora_metrics:collect()), metrics};
+        _    -> {ok, reply(Req, 404, #{error => <<"not_found">>}), metrics}
+    end;
 init(Req0, jobs) ->
     case cowboy_req:method(Req0) of
         <<"POST">> ->

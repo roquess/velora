@@ -12,6 +12,7 @@ child_spec() ->
             {"/health",           velora_api_h, health},
             {"/cluster",          velora_api_h, cluster},
             {"/info",             velora_api_h, info},
+            {"/metrics",          velora_api_h, metrics},
             {"/agent/query",      velora_agent_h, []},
             {"/uploads",          velora_upload_h, []},
             {"/render",           velora_render_h, []},
