@@ -20,6 +20,7 @@ child_spec() ->
             {"/jobs",             velora_api_h, jobs},
             {"/jobs/:id",         velora_api_h, job},
             {"/jobs/:id/result",  velora_result_h, []},
+            {"/jobs/:id/tiles/:z/:x/:y", velora_job_tiles_h, []},
             {"/jobs/:id/search",  velora_api_h, search}
         ]}
     ]),

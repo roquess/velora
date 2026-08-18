@@ -38,13 +38,39 @@ do(info, Q) ->
 do(ndvi, Q) ->
     case resolve(ndvi, Q) of
         {ok, {Red, Nir}} ->
-            case velora_web:prepare_ndvi(Red, Nir) of
-                {ok, Id, Bounds, NZ, Stats} -> {ok, ndvi_card(Id, Bounds, NZ, Stats)};
-                E -> E
+            case application:get_env(velora, ndvi_fullres, true) of
+                true  -> ndvi_fullres(Red, Nir);
+                _     -> ndvi_preview_only(Red, Nir)
             end;
         E -> E
     end;
 do(_, _) -> {error, unknown_intent}.
+
+%% Instant capped preview + a full-resolution job; the card carries both so the
+%% client shows the preview immediately and swaps to the sharp result once the
+%% job (polled via `/jobs/:id') is done.
+ndvi_fullres(Red, Nir) ->
+    Preview = case velora_web:prepare_ndvi(Red, Nir) of
+                  {ok, Id, Bounds, NZ, Stats} ->
+                      #{id => Id, bounds => Bounds, maxNativeZoom => NZ,
+                        stats => Stats,
+                        tiles => <<"/tiles/", Id/binary, "/{z}/{x}/{y}">>};
+                  _ -> null
+              end,
+    case velora_ndvi:submit(Red, Nir) of
+        {ok, JobId} -> {ok, ndvi_async_card(to_bin(JobId), Preview)};
+        E -> E
+    end.
+
+ndvi_preview_only(Red, Nir) ->
+    case velora_web:prepare_ndvi(Red, Nir) of
+        {ok, Id, Bounds, NZ, Stats} -> {ok, ndvi_card(Id, Bounds, NZ, Stats)};
+        E -> E
+    end.
+
+to_bin(B) when is_binary(B) -> B;
+to_bin(I) when is_integer(I) -> integer_to_binary(I);
+to_bin(L) when is_list(L) -> list_to_binary(L).
 
 %% Resolve a query to a source. tiles/info -> a single COG uri; ndvi -> {Red,Nir}.
 -spec resolve(atom(), binary()) -> {ok, term()} | {error, term()}.
@@ -80,6 +106,13 @@ tiles_card(Id, Bounds, NZ) ->
 -spec ndvi_card(binary(), [[float()]], integer(), map()) -> map().
 ndvi_card(Id, Bounds, NZ, Stats) ->
     (tiles_card(Id, Bounds, NZ))#{type => <<"ndvi">>, stats => Stats}.
+
+-spec ndvi_async_card(binary(), map() | null) -> map().
+ndvi_async_card(JobId, Preview) ->
+    #{type => <<"ndvi">>, status => <<"processing">>, job => JobId,
+      poll => <<"/jobs/", JobId/binary>>,
+      result_tiles => <<"/jobs/", JobId/binary, "/tiles/{z}/{x}/{y}">>,
+      preview => Preview}.
 
 -spec info_card(map()) -> map().
 info_card(Meta) -> Meta#{type => <<"info">>}.
