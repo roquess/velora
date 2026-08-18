@@ -13,6 +13,7 @@ init(Req, info) ->
     Info = #{node => node(),
              nodes => length(velora_cluster:members()),
              workers_per_node => velora_config:workers_per_node(),
+             emergence => emergence_status(),
              jobs => #{total => length(Jobs), running => Count(running),
                        done => Count(done), error => Count(error)}},
     {ok, reply(Req, 200, Info), info};
@@ -64,6 +65,12 @@ init(Req0, search) ->
         {error, R} ->
             {ok, reply(Req1, 400, #{error => errbin(R)}), search}
     end.
+
+%% Mesh membership, guarded so /info never fails if velora_emergence is down.
+emergence_status() ->
+    try #{enabled => velora_emergence:enabled(),
+          peers   => length(velora_emergence:peers())}
+    catch _:_ -> #{enabled => false, peers => 0} end.
 
 decode_search(Body) ->
     try
