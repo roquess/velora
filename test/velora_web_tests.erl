@@ -429,3 +429,40 @@ prepare_asset_sample_test_() ->
                              velora_web:prepare(<<"asset://samples/carina.jpg">>))
         end
     end}.
+
+%% --- #06 info card: bbox + overviews ---
+
+extract_bbox_present_test() ->
+    M = #{<<"wgs84Extent">> => #{<<"type">> => <<"Polygon">>,
+          <<"coordinates">> => [[[2.0, 49.0], [3.0, 49.0], [3.0, 48.0],
+                                 [2.0, 48.0], [2.0, 49.0]]]}},
+    ?assertEqual([2.0, 48.0, 3.0, 49.0], velora_web:extract_bbox(M)).
+
+extract_bbox_absent_test() ->
+    ?assertEqual(undefined, velora_web:extract_bbox(#{})),
+    ?assertEqual(undefined, velora_web:extract_bbox(#{<<"wgs84Extent">> => #{}})).
+
+extract_overviews_test() ->
+    M = #{<<"bands">> => [#{<<"overviews">> =>
+              [#{<<"size">> => [256, 256]}, #{<<"size">> => [128, 128]}]}]},
+    ?assertEqual(2, velora_web:extract_overviews(M)),
+    ?assertEqual(0, velora_web:extract_overviews(#{<<"bands">> => [#{}]})),
+    ?assertEqual(0, velora_web:extract_overviews(#{})).
+
+info_bbox_overviews_test_() ->
+    {timeout, 30, fun() ->
+        case gdal_available() of
+            false -> ok;
+            true  ->
+                with_file_scheme_allowed(fun() ->
+                    Dir = velora_worker_tests:tmp_dir(),
+                    Scene = velora_worker_tests:make_2band_u16(Dir, "info06", 16, 16),
+                    {ok, Info} = velora_web:info(list_to_binary(Scene)),
+                    ?assert(maps:is_key(bbox, Info)),
+                    Bbox = maps:get(bbox, Info),
+                    ?assert(Bbox =:= undefined orelse
+                            (is_list(Bbox) andalso length(Bbox) =:= 4)),
+                    ?assert(is_integer(maps:get(overviews, Info)))
+                end)
+        end
+    end}.

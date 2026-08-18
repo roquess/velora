@@ -9,7 +9,7 @@
 %% exported for unit tests
 -export([bbox_3857/3, fake_extent/2, jdecode/1, native_zoom/1, scheme/1, allowed/1,
          source_size_ok/2, tile_key/4, tiles_cache/0, render_count/0, reset_render_count/0,
-         prepare_cache/0, canonical/1, source_hash/1]).
+         prepare_cache/0, canonical/1, source_hash/1, extract_bbox/1, extract_overviews/1]).
 
 -include_lib("kernel/include/file.hrl").
 
@@ -417,15 +417,44 @@ info_1(Uri) ->
     case velora_storage:cmd("gdalinfo", ["-json", In]) of
         {ok, Out} ->
             J = jdecode(Out),
-            {ok, #{size   => maps:get(<<"size">>, J, [0, 0]),
-                   bands  => length(maps:get(<<"bands">>, J, [])),
-                   crs    => case J of
-                                 #{<<"coordinateSystem">> := #{<<"wkt">> := W}} -> W;
-                                 _ -> <<"unknown">>
-                             end,
-                   driver => maps:get(<<"driverShortName">>, J, <<"?">>)}};
+            {ok, #{size      => maps:get(<<"size">>, J, [0, 0]),
+                   bands     => length(maps:get(<<"bands">>, J, [])),
+                   crs       => case J of
+                                    #{<<"coordinateSystem">> := #{<<"wkt">> := W}} -> W;
+                                    _ -> <<"unknown">>
+                                end,
+                   driver    => maps:get(<<"driverShortName">>, J, <<"?">>),
+                   bbox      => extract_bbox(J),
+                   overviews => extract_overviews(J)}};
         {error, R} -> {error, R}
     end.
+
+%% @doc `[MinLon,MinLat,MaxLon,MaxLat]' from a gdalinfo `-json' map's
+%% `wgs84Extent' GeoJSON polygon (min/max over every vertex, robust to Polygon
+%% and MultiPolygon nesting); `undefined' for a non-georeferenced source.
+-spec extract_bbox(map()) -> [float()] | undefined.
+extract_bbox(#{<<"wgs84Extent">> := #{<<"coordinates">> := Coords}}) ->
+    case collect_points(Coords, []) of
+        []  -> undefined;
+        Pts ->
+            Lons = [Lon || [Lon, _Lat] <- Pts],
+            Lats = [Lat || [_Lon, Lat] <- Pts],
+            [lists:min(Lons), lists:min(Lats), lists:max(Lons), lists:max(Lats)]
+    end;
+extract_bbox(_) -> undefined.
+
+%% Flatten GeoJSON coordinate nesting down to the [Lon,Lat] leaf pairs.
+collect_points([Lon, Lat], Acc) when is_number(Lon), is_number(Lat) ->
+    [[float(Lon), float(Lat)] | Acc];
+collect_points(L, Acc) when is_list(L) ->
+    lists:foldl(fun collect_points/2, Acc, L);
+collect_points(_, Acc) -> Acc.
+
+%% @doc Overview count of band 1, 0 when none.
+-spec extract_overviews(map()) -> non_neg_integer().
+extract_overviews(#{<<"bands">> := [#{<<"overviews">> := Ov} | _]}) when is_list(Ov) ->
+    length(Ov);
+extract_overviews(_) -> 0.
 
 %% @doc Compute NDVI from a Red and a Nir source and lay the result out as a
 %% web-mercator Byte COG identical to `prepare/1''s, so `tile/4' serves it
