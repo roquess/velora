@@ -13,6 +13,7 @@ const startCmd =
 module.exports = defineConfig({
   testDir: ".",
   timeout: 180000,
+  globalSetup: require.resolve("./global-setup.js"),
   use: { baseURL: "http://127.0.0.1:8080", headless: true },
   webServer: {
     command: startCmd,
