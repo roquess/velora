@@ -124,9 +124,23 @@ async function plainRender(uri) {
     body: JSON.stringify({ uri })
   });
   if (!r.ok) throw new Error("render failed: " + (await r.text()));
-  const { id, bounds, maxNativeZoom } = await r.json();
-  setTiles("/tiles/" + id + "/{z}/{x}/{y}", bounds, maxNativeZoom || 19);
+  // /render is async: it answers "processing" with a poll URL; wait for the warp.
+  const done = await pollPrepare(await r.json());
+  setTiles("/tiles/" + done.id + "/{z}/{x}/{y}", done.bounds, done.maxNativeZoom || 19);
   setStatus("Done.");
+}
+
+// Poll GET /prepare/:id until the background warp is done (or errors).
+async function pollPrepare(resp) {
+  if (!resp || resp.status !== "processing") return resp; // already a final answer
+  for (let i = 0; i < 200; i++) {          // ~5 min at 1.5s
+    await new Promise((f) => setTimeout(f, 1500));
+    let st;
+    try { st = await (await fetch(resp.poll)).json(); } catch (_) { continue; }
+    if (st.status === "done") return st;
+    if (st.status === "error") throw new Error("render failed: " + (st.error || "error"));
+  }
+  throw new Error("render timed out");
 }
 
 // NDVI via the agent's async contract: show the instant capped preview, then

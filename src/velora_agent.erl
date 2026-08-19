@@ -20,10 +20,11 @@ handle(_) -> [].
 do(tiles, Q) ->
     case resolve(tiles, Q) of
         {ok, Src} ->
-            case velora_web:prepare(Src) of
-                {ok, Id, Bounds, NZ} -> {ok, tiles_card(Id, Bounds, NZ)};
-                E -> E
-            end;
+            %% Async: kick off the warp in the background and answer with a
+            %% processing card the client polls (/prepare/:id), instead of
+            %% holding the request open for the whole warp.
+            {ok, PrepId} = velora_prepare_async:submit(Src),
+            {ok, prepare_card(PrepId)};
         E -> E
     end;
 do(info, Q) ->
@@ -104,6 +105,13 @@ pick_assets(ndvi, #{red := R, nir := N}) when is_binary(R), is_binary(N) ->
 pick_assets(ndvi, _) -> {error, no_ndvi_bands};
 pick_assets(_, #{visual := V}) when is_binary(V) -> {ok, V};
 pick_assets(_, _) -> {error, no_visual_asset}.
+
+%% Processing card for an async render: the client polls `poll' until the warp
+%% is done, then loads the tiles it reports.
+-spec prepare_card(binary()) -> map().
+prepare_card(PrepId) ->
+    #{type => <<"raster">>, status => <<"processing">>,
+      prepare => PrepId, poll => <<"/prepare/", PrepId/binary>>}.
 
 -spec tiles_card(binary(), [[float()]], integer()) -> map().
 tiles_card(Id, Bounds, NZ) ->

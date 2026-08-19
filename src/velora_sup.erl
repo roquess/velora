@@ -15,6 +15,8 @@ init([]) ->
           type => supervisor},
         #{id => velora_render_registry,
           start => {velora_render_registry, start_link, []}},
+        #{id => velora_prepare_async,
+          start => {velora_prepare_async, start_link, []}},
         #{id => velora_worker_pool,
           start => {velora_worker_pool, start_link, []},
           type => supervisor},

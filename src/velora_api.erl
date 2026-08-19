@@ -16,6 +16,7 @@ child_spec() ->
             {"/agent/query",      velora_agent_h, []},
             {"/uploads",          velora_upload_h, []},
             {"/render",           velora_render_h, []},
+            {"/prepare/:id",      velora_prepare_h, []},
             {"/tiles/:id/:z/:x/:y", velora_tiles_h, []},
             {"/jobs",             velora_api_h, jobs},
             {"/jobs/:id",         velora_api_h, job},

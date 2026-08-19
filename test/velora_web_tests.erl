@@ -104,22 +104,30 @@ agent_query_test_() ->
     end}.
 
 do_agent_query() ->
-    velora_storage:ensure_gdal_env(),
-    Dir = velora_worker_tests:tmp_dir(),
-    Scene = velora_worker_tests:make_2band_u16(Dir, "agentscene", 16, 16),
-    %% velora_agent classifies a query as a raster URI only when it carries a
-    %% scheme ("://"); a bare filesystem path is otherwise treated as a place.
-    Uri = <<"file://", (list_to_binary(Scene))/binary>>,
-    Body = jsx:encode(#{uri => Uri}),
-    %% this test drives velora_web:prepare/1 with a local `file://' fixture, so
-    %% opt `file' back into the allowlist for the duration of the call (the
-    %% product default stays deny; only the test widens it)
-    [R] = with_file_scheme_allowed(fun() -> velora_agent_h:handle_query(Body) end),
-    ?assertEqual(<<"raster">>, maps:get(type, R)),
-    ?assert(is_binary(maps:get(id, R))),
-    ?assertMatch([[_, _], [_, _]], maps:get(bounds, R)),
-    %% a query without a source URI answers with no results
-    ?assertEqual([], velora_agent_h:handle_query(jsx:encode(#{query => <<"hello world">>}))).
+    {ok, Reg} = velora_render_registry:start_link(),
+    {ok, Pa}  = velora_prepare_async:start_link(),
+    %% file:// is denied by default; widen for the whole test since the async
+    %% prepare worker runs (and re-checks the scheme) after handle_query returns.
+    application:set_env(velora, allowed_schemes, [file, https, s3, gs, work]),
+    try
+        velora_storage:ensure_gdal_env(),
+        Dir = velora_worker_tests:tmp_dir(),
+        Scene = velora_worker_tests:make_2band_u16(Dir, "agentscene", 16, 16),
+        Uri = <<"file://", (list_to_binary(Scene))/binary>>,
+        %% tiles is async: a processing card with a prepare id to poll
+        [R] = velora_agent_h:handle_query(jsx:encode(#{uri => Uri})),
+        ?assertEqual(<<"raster">>, maps:get(type, R)),
+        ?assertEqual(<<"processing">>, maps:get(status, R)),
+        Prep = maps:get(prepare, R),
+        velora_test_util:wait_until(
+            fun() -> velora_prepare_async:status(Prep) =/= processing end, 30000),
+        ?assertMatch({ok, _, [[_, _], [_, _]], _}, velora_prepare_async:status(Prep)),
+        %% a query without a source URI answers with no results
+        ?assertEqual([], velora_agent_h:handle_query(jsx:encode(#{query => <<"hello world">>})))
+    after
+        application:unset_env(velora, allowed_schemes),
+        gen_server:stop(Pa), gen_server:stop(Reg)
+    end.
 
 %% intent routing: a URI query resolves regardless of a network error being
 %% possible downstream; an empty query (with or without an explicit intent)

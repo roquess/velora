@@ -20,20 +20,26 @@ tiles_local_test_() ->
         case gdal() of
             false -> ok;
             true ->
-                velora_storage:ensure_gdal_env(),
-                Dir = velora_worker_tests:tmp_dir(),
-                Scene = velora_worker_tests:make_2band_u16(Dir, "agentscene", 16, 16),
-                %% local `file://' fixture: velora_web:allowed/1 denies `file' by
-                %% default now (SSRF / local-file-read hardening), so opt it back
-                %% in for this call only; the product default stays deny.
+                {ok, Reg} = velora_render_registry:start_link(),
+                {ok, Pa}  = velora_prepare_async:start_link(),
                 application:set_env(velora, allowed_schemes, [file, https, s3, gs, work]),
-                Cards = try
-                            velora_agent:handle(#{intent => tiles,
-                                                  query => list_to_binary("file://" ++ Scene)})
-                        after
-                            application:unset_env(velora, allowed_schemes)
-                        end,
-                ?assertMatch([#{type := <<"raster">>, tiles := _} | _], Cards)
+                try
+                    velora_storage:ensure_gdal_env(),
+                    Dir = velora_worker_tests:tmp_dir(),
+                    Scene = velora_worker_tests:make_2band_u16(Dir, "agentscene", 16, 16),
+                    %% tiles is async now: a processing card with a prepare id to poll
+                    [Card] = velora_agent:handle(#{intent => tiles,
+                                                   query => list_to_binary("file://" ++ Scene)}),
+                    ?assertEqual(<<"processing">>, maps:get(status, Card)),
+                    Prep = maps:get(prepare, Card),
+                    velora_test_util:wait_until(
+                        fun() -> velora_prepare_async:status(Prep) =/= processing end, 30000),
+                    ?assertMatch({ok, _Id, [[_, _], [_, _]], _NZ},
+                                 velora_prepare_async:status(Prep))
+                after
+                    application:unset_env(velora, allowed_schemes),
+                    gen_server:stop(Pa), gen_server:stop(Reg)
+                end
         end
     end}.
 
