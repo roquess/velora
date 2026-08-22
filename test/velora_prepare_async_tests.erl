@@ -34,6 +34,23 @@ do_submit_poll() ->
         gen_server:stop(Pa), gen_server:stop(Reg)
     end.
 
+%% A prepare that fails (here: a disallowed scheme, rejected before any GDAL
+%% call) must reach a terminal {error,_} state — never stay stuck `processing'.
+%% This guards the worker-lifecycle contract the /prepare poll depends on.
+submit_error_terminal_test() ->
+    {ok, Reg} = velora_render_registry:start_link(),
+    {ok, Pa}  = velora_prepare_async:start_link(),
+    application:set_env(velora, allowed_schemes, [https, s3, gs, work, asset]),
+    try
+        {ok, Id} = velora_prepare_async:submit(<<"file:///etc/passwd">>),
+        velora_test_util:wait_until(
+            fun() -> velora_prepare_async:status(Id) =/= processing end, 10000),
+        ?assertMatch({error, _}, velora_prepare_async:status(Id))
+    after
+        application:unset_env(velora, allowed_schemes),
+        gen_server:stop(Pa), gen_server:stop(Reg)
+    end.
+
 gdal() ->
     case velora_storage:scene_meta("/nonexistent") of
         {error, {gdalinfo_failed, {spawn_failed, _}}} -> false; _ -> true

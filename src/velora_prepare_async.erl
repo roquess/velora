@@ -30,28 +30,47 @@ status(Id) ->
         []                -> not_found
     end.
 
+%% State is a map of the live workers' monitor refs => prepare id, so a worker
+%% that dies before reporting can be turned into an error instead of a row that
+%% stays `processing' forever.
 init([]) ->
     ets:new(?TAB, [named_table, public, {read_concurrency, true}]),
     erlang:send_after(?SWEEP_MS, self(), sweep),
     {ok, #{}}.
 
-handle_call({submit, Uri}, _From, S) ->
+handle_call({submit, Uri}, _From, Refs) ->
     Id = integer_to_binary(erlang:unique_integer([positive])),
     store(Id, processing),
     Self = self(),
-    _ = spawn(fun() ->
+    %% spawn_monitor: if the worker crashes/gets killed before it casts {done},
+    %% the DOWN below marks the prepare failed so the client stops polling.
+    {_Pid, Ref} = spawn_monitor(fun() ->
         Result = try normalize(velora_render:prepare(Uri))
                  catch C:E -> {error, {C, E}} end,
         gen_server:cast(Self, {done, Id, Result})
     end),
-    {reply, {ok, Id}, S};
+    {reply, {ok, Id}, Refs#{Ref => Id}};
 handle_call(_R, _F, S) -> {reply, ok, S}.
 
-handle_cast({done, Id, Result}, S) ->
+handle_cast({done, Id, Result}, Refs) ->
     store(Id, Result),
-    {noreply, S};
+    {noreply, Refs};
 handle_cast(_M, S) -> {noreply, S}.
 
+%% Worker exited. On a normal exit the {done} cast has already stored the result
+%% (cast is enqueued before the DOWN), so status/1 is no longer `processing' and
+%% we leave it. On a crash/kill the row is still `processing' → mark it failed.
+handle_info({'DOWN', Ref, process, _Pid, Reason}, Refs) ->
+    case maps:take(Ref, Refs) of
+        {Id, Refs1} ->
+            case status(Id) of
+                processing -> store(Id, {error, {worker_died, Reason}});
+                _          -> ok
+            end,
+            {noreply, Refs1};
+        error ->
+            {noreply, Refs}
+    end;
 handle_info(sweep, S) ->
     Cutoff = now_ms() - ?TTL_MS,
     %% only sweep finished entries; leave in-flight `processing' ones
