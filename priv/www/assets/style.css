@@ -23,8 +23,15 @@ body {
 #app { position: fixed; inset: 0; }
 #map { position: absolute; inset: 0; background: #000; }
 
-/* keep raster tiles crisp when zoomed past the data's native resolution */
-.leaflet-tile { image-rendering: crisp-edges; image-rendering: pixelated; }
+/* keep raster tiles crisp when zoomed past the data's native resolution;
+   the +0.5px lets neighbouring tiles overlap by a subpixel so the black
+   background never shows through as a hairline seam between them */
+.leaflet-tile {
+  image-rendering: crisp-edges;
+  image-rendering: pixelated;
+  width: 256.5px !important;
+  height: 256.5px !important;
+}
 
 /* ---- floating control panel ---- */
 #panel {
