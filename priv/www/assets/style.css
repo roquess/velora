@@ -23,16 +23,13 @@ body {
 #app { position: fixed; inset: 0; }
 #map { position: absolute; inset: 0; background: #000; }
 
-/* keep raster tiles crisp when zoomed past the data's native resolution;
-   the +1px lets neighbouring tiles overlap so the black background never
-   shows through as a hairline seam between them (0.5px was too thin on
-   1x-DPI displays) */
-.leaflet-tile {
-  image-rendering: crisp-edges;
-  image-rendering: pixelated;
-  width: 257px !important;
-  height: 257px !important;
-}
+/* keep raster tiles crisp when zoomed past the data's native resolution.
+   NB: leave the tile size at Leaflet's native 256px — do NOT widen it to
+   overlap neighbours. Tiles carry a faint light edge from the warp/resample
+   that is hidden when they abut exactly, but a fractional-px overscale plus
+   `pixelated` exposes it as bright antialiased seam lines. Native size renders
+   seamlessly at every zoom and fractional pan (verified in-browser). */
+.leaflet-tile { image-rendering: crisp-edges; image-rendering: pixelated; }
 
 /* ---- floating control panel ---- */
 #panel {
